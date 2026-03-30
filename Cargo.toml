@@ -1,7 +1,19 @@
 [package]
 name = "git-semantic"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+authors = ["CHERRAD Charef <ccherrad@gmail.com>"]
+description = "A semantic search layer for Git repositories using vector embeddings"
+readme = "README.md"
+repository = "https://github.com/ccherrad/git-semantic"
+license = "MIT OR Apache-2.0"
+keywords = ["git", "semantic-search", "embeddings", "vector-search", "code-search"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    ".git/",
+    ".gitignore",
+    "target/",
+]
 
 [dependencies]
 anyhow = "1.0.102"
