@@ -1,7 +1,7 @@
-mod models;
 mod db;
-mod git;
 mod embed;
+mod git;
+mod models;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -10,7 +10,8 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "git-semantic")]
 #[command(version, about = "Semantic search layer for Git repositories")]
-#[command(long_about = "git-semantic augments Git commits with vector embeddings, enabling semantic code search.\n\n\
+#[command(
+    long_about = "git-semantic augments Git commits with vector embeddings, enabling semantic code search.\n\n\
 Features:\n\
   • Attach semantic notes (embeddings + context) to commits\n\
   • Search code by meaning using natural language queries\n\
@@ -23,7 +24,8 @@ Examples:\n\
   git semantic commit -a -m \"Add authentication\"\n\
   git semantic reindex HEAD~10..HEAD\n\
   git semantic grep \"error handling logic\"\n\
-  git semantic pull")]
+  git semantic pull"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -32,18 +34,21 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     #[command(about = "Pull changes and sync semantic notes from remote")]
-    #[command(long_about = "Performs git pull and fetches refs/notes/semantic from remote.\n\n\
+    #[command(
+        long_about = "Performs git pull and fetches refs/notes/semantic from remote.\n\n\
 Rebuilds local SQLite database from all semantic notes.\n\n\
 Example:\n\
   git semantic pull\n\
-  git semantic pull upstream")]
+  git semantic pull upstream"
+    )]
     Pull {
         #[arg(help = "Remote name (default: origin)")]
         remote: Option<String>,
     },
 
     #[command(about = "Create commit with semantic notes attached")]
-    #[command(long_about = "Creates a Git commit and attaches semantic notes containing:\n\
+    #[command(
+        long_about = "Creates a Git commit and attaches semantic notes containing:\n\
   • Commit message and metadata\n\
   • Full diff of changes\n\
   • Vector embeddings (768-dim)\n\n\
@@ -52,7 +57,8 @@ The note is stored in refs/notes/semantic and can be shared with:\n\
 Examples:\n\
   git semantic commit -a -m \"Add user login\"\n\
   git semantic commit -m \"Fix bug in parser\"\n\
-  git semantic commit  (interactive mode)")]
+  git semantic commit  (interactive mode)"
+    )]
     Commit {
         #[arg(short, long, help = "Commit message")]
         message: Option<String>,
@@ -71,12 +77,18 @@ Examples:\n\
     Grep {
         #[arg(help = "Search query in natural language")]
         query: String,
-        #[arg(short = 'n', long, default_value = "10", help = "Maximum number of results")]
+        #[arg(
+            short = 'n',
+            long,
+            default_value = "10",
+            help = "Maximum number of results"
+        )]
         max_count: i64,
     },
 
     #[command(about = "Add semantic notes to existing commits")]
-    #[command(long_about = "Retroactively adds semantic notes to commits in the specified range.\n\n\
+    #[command(
+        long_about = "Retroactively adds semantic notes to commits in the specified range.\n\n\
 Useful for indexing existing repositories or adding notes to commits\n\
 created with regular 'git commit'.\n\n\
 For each commit:\n\
@@ -86,14 +98,16 @@ For each commit:\n\
 Examples:\n\
   git semantic reindex HEAD~3..HEAD    (last 3 commits)\n\
   git semantic reindex main..HEAD      (all commits since main)\n\
-  git semantic reindex abc123..def456  (specific range)")]
+  git semantic reindex abc123..def456  (specific range)"
+    )]
     Reindex {
         #[arg(help = "Commit range (e.g., HEAD~3, main..HEAD, abc123..def456)")]
         range: String,
     },
 
     #[command(about = "Display semantic note for a commit")]
-    #[command(long_about = "Shows the semantic note attached to a commit with formatted display.\n\n\
+    #[command(
+        long_about = "Shows the semantic note attached to a commit with formatted display.\n\n\
 Displays:\n\
   • Commit SHA and metadata\n\
   • Embedding dimensions\n\
@@ -101,9 +115,13 @@ Displays:\n\
 Examples:\n\
   git semantic show           (show HEAD)\n\
   git semantic show abc123    (specific commit)\n\
-  git semantic show HEAD~2    (2 commits back)")]
+  git semantic show HEAD~2    (2 commits back)"
+    )]
     Show {
-        #[arg(help = "Commit SHA or reference (default: HEAD)", default_value = "HEAD")]
+        #[arg(
+            help = "Commit SHA or reference (default: HEAD)",
+            default_value = "HEAD"
+        )]
         commit: String,
     },
 }
@@ -161,10 +179,16 @@ fn pull_and_sync(remote: Option<&str>) -> Result<()> {
         .output()
         .context("Failed to get current branch")?;
 
-    let current_branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
+    let current_branch = String::from_utf8_lossy(&branch_output.stdout)
+        .trim()
+        .to_string();
 
     let upstream_check = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", &format!("{}@{{upstream}}", current_branch)])
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{}@{{upstream}}", current_branch),
+        ])
         .output();
 
     let needs_pull = match upstream_check {
@@ -200,7 +224,11 @@ fn pull_and_sync(remote: Option<&str>) -> Result<()> {
     println!("Syncing semantic notes from refs/notes/semantic...");
 
     let fetch_result = std::process::Command::new("git")
-        .args(["fetch", remote_name, "refs/notes/semantic:refs/notes/semantic"])
+        .args([
+            "fetch",
+            remote_name,
+            "refs/notes/semantic:refs/notes/semantic",
+        ])
         .status();
 
     match fetch_result {
@@ -210,11 +238,9 @@ fn pull_and_sync(remote: Option<&str>) -> Result<()> {
 
     println!("Rebuilding local semantic index...");
 
-    let db = db::Database::init()
-        .context("Failed to initialize database")?;
+    let db = db::Database::init().context("Failed to initialize database")?;
 
-    let notes = git::read_notes(&repo_path)
-        .context("Failed to read semantic notes")?;
+    let notes = git::read_notes(&repo_path).context("Failed to read semantic notes")?;
 
     if notes.is_empty() {
         println!("No semantic notes to sync");
@@ -223,7 +249,11 @@ fn pull_and_sync(remote: Option<&str>) -> Result<()> {
 
     let mut total_chunks = 0;
     for (commit_sha, chunks) in notes {
-        println!("Processing {} chunks from commit {}...", chunks.len(), &commit_sha[..8]);
+        println!(
+            "Processing {} chunks from commit {}...",
+            chunks.len(),
+            &commit_sha[..8]
+        );
         for chunk in chunks {
             db.insert_chunk(&chunk)
                 .context("Failed to insert chunk into database")?;
@@ -231,9 +261,11 @@ fn pull_and_sync(remote: Option<&str>) -> Result<()> {
         }
     }
 
-    println!("Semantic index synchronized: {} chunks from {} commits",
-             total_chunks,
-             git::list_commits_with_notes(&repo_path)?.len());
+    println!(
+        "Semantic index synchronized: {} chunks from {} commits",
+        total_chunks,
+        git::list_commits_with_notes(&repo_path)?.len()
+    );
 
     Ok(())
 }
@@ -266,13 +298,12 @@ fn commit_with_notes(message: Option<&str>, all: bool) -> Result<()> {
         Err(_) => false,
     };
 
-    let repo = gix::open(&repo_path)
-        .context("Failed to open Git repository")?;
+    let repo = gix::open(&repo_path).context("Failed to open Git repository")?;
 
-    let head_before = repo.head()
-        .context("Failed to get HEAD reference")?;
+    let head_before = repo.head().context("Failed to get HEAD reference")?;
 
-    let commit_id_before = head_before.into_peeled_id()
+    let commit_id_before = head_before
+        .into_peeled_id()
         .context("Failed to resolve HEAD to commit")?;
 
     let commit_sha_before = commit_id_before.to_string();
@@ -308,13 +339,14 @@ fn commit_with_notes(message: Option<&str>, all: bool) -> Result<()> {
             anyhow::bail!("Git commit failed");
         }
 
-        let repo_refreshed = gix::open(&repo_path)
-            .context("Failed to reopen repository")?;
+        let repo_refreshed = gix::open(&repo_path).context("Failed to reopen repository")?;
 
-        let head_after = repo_refreshed.head()
+        let head_after = repo_refreshed
+            .head()
             .context("Failed to get HEAD reference after commit")?;
 
-        let commit_id_after = head_after.into_peeled_id()
+        let commit_id_after = head_after
+            .into_peeled_id()
             .context("Failed to resolve HEAD to commit")?;
 
         let commit_sha_after = commit_id_after.to_string();
@@ -342,33 +374,41 @@ fn commit_with_notes(message: Option<&str>, all: bool) -> Result<()> {
         (commit_sha_before, last_commit_message, diff_text)
     };
 
-    println!("Generating semantic embeddings for commit {}...", &commit_sha[..8]);
+    println!(
+        "Generating semantic embeddings for commit {}...",
+        &commit_sha[..8]
+    );
 
     let textual_note = format!(
         "Commit: {}\nMessage: {}\n\nDiff:\n{}",
         commit_sha, commit_message, diff_text
     );
 
-    let vector_embedding = embed::generate_embedding(&diff_text)
-        .context("Failed to generate embedding for diff")?;
+    let vector_embedding =
+        embed::generate_embedding(&diff_text).context("Failed to generate embedding for diff")?;
 
-    git::write_note(
-        &repo_path,
-        &commit_sha,
-        &[models::CodeChunk {
-            file_path: "commit".to_string(),
-            start_line: 0,
-            end_line: 0,
-            content: textual_note,
-            commit_sha: commit_sha.clone(),
-            embedding: vector_embedding,
-        }],
-    )
-    .context("Failed to write semantic notes")?;
+    let chunk = models::CodeChunk {
+        file_path: "commit".to_string(),
+        start_line: 0,
+        end_line: 0,
+        content: textual_note,
+        commit_sha: commit_sha.clone(),
+        embedding: vector_embedding,
+        distance: None,
+    };
+
+    git::write_note(&repo_path, &commit_sha, std::slice::from_ref(&chunk))
+        .context("Failed to write semantic notes")?;
+
+    let db = db::Database::init().context("Failed to initialize database")?;
+
+    db.insert_chunk(&chunk)
+        .context("Failed to insert chunk into database")?;
 
     println!("✓ Semantic notes attached to commit {}", &commit_sha[..8]);
     println!("  - Note stored in refs/notes/semantic");
     println!("  - Contains textual context and vector embeddings");
+    println!("  - Database indexed for semantic search");
     println!("\nTo share with team:");
     println!("  git push origin refs/notes/semantic");
 
@@ -376,17 +416,29 @@ fn commit_with_notes(message: Option<&str>, all: bool) -> Result<()> {
 }
 
 fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
-    let db = db::Database::init()
-        .context("Failed to initialize database")?;
+    let db = db::Database::init().context("Failed to initialize database")?;
 
-    let query_embedding = embed::generate_embedding(query)
-        .context("Failed to generate query embedding")?;
+    let query_embedding =
+        embed::generate_embedding(query).context("Failed to generate query embedding")?;
 
-    let results = db.search_similar(&query_embedding, max_count)
+    let results = db
+        .search_similar(&query_embedding, max_count)
         .context("Failed to search database")?;
 
     for chunk in results.iter() {
-        println!("{}:{}:{}", chunk.file_path, chunk.start_line, chunk.content.lines().next().unwrap_or(""));
+        let similarity = if let Some(dist) = chunk.distance {
+            format!("dist={:.3}", dist)
+        } else {
+            "N/A".to_string()
+        };
+
+        println!(
+            "[{}] {}:{}:{}",
+            similarity,
+            chunk.file_path,
+            chunk.start_line,
+            chunk.content.lines().next().unwrap_or("")
+        );
     }
 
     Ok(())
@@ -418,8 +470,17 @@ fn reindex_commits(range: &str) -> Result<()> {
 
     println!("Found {} commits to reindex", commits.len());
 
+    let db = db::Database::init().context("Failed to initialize database")?;
+
+    let mut all_chunks = Vec::new();
+
     for (i, commit_sha) in commits.iter().enumerate() {
-        println!("\n[{}/{}] Processing commit {}...", i + 1, commits.len(), &commit_sha[..8]);
+        println!(
+            "\n[{}/{}] Processing commit {}...",
+            i + 1,
+            commits.len(),
+            &commit_sha[..8]
+        );
 
         let commit_msg_output = std::process::Command::new("git")
             .current_dir(&repo_path)
@@ -453,24 +514,32 @@ fn reindex_commits(range: &str) -> Result<()> {
             commit_sha, commit_message, diff_text
         );
 
-        git::write_note(
-            &repo_path,
-            commit_sha,
-            &[models::CodeChunk {
-                file_path: "commit".to_string(),
-                start_line: 0,
-                end_line: 0,
-                content: textual_note,
-                commit_sha: commit_sha.to_string(),
-                embedding: vector_embedding,
-            }],
-        )
-        .context("Failed to write semantic note")?;
+        let chunk = models::CodeChunk {
+            file_path: "commit".to_string(),
+            start_line: 0,
+            end_line: 0,
+            content: textual_note,
+            commit_sha: commit_sha.to_string(),
+            embedding: vector_embedding,
+            distance: None,
+        };
 
-        println!("  ✓ Semantic note attached");
+        git::write_note(&repo_path, commit_sha, std::slice::from_ref(&chunk))
+            .context("Failed to write semantic note")?;
+
+        db.insert_chunk(&chunk)
+            .context("Failed to insert chunk into database")?;
+
+        all_chunks.push(chunk);
+
+        println!("  ✓ Semantic note attached and indexed");
     }
 
-    println!("\n✓ Reindexing complete: {} commits processed", commits.len());
+    println!(
+        "\n✓ Reindexing complete: {} commits processed",
+        commits.len()
+    );
+    println!("✓ Database hydrated with {} chunks", all_chunks.len());
     println!("\nTo share with team:");
     println!("  git push origin refs/notes/semantic");
 
@@ -496,13 +565,7 @@ fn show_semantic_note(commit: &str) -> Result<()> {
 
     let show_output = std::process::Command::new("git")
         .current_dir(&repo_path)
-        .args([
-            "notes",
-            "--ref",
-            "refs/notes/semantic",
-            "show",
-            &commit_sha,
-        ])
+        .args(["notes", "--ref", "refs/notes/semantic", "show", &commit_sha])
         .output()
         .context("Failed to show semantic note")?;
 
