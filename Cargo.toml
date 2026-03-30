@@ -27,3 +27,11 @@ serde_json = "1.0.149"
 sqlite-vec = "0.1.6"
 walkdir = "2.5.0"
 zerocopy = "0.8.14"
+
+[[bin]]
+name = "gitsem"
+path = "src/main.rs"
+
+[[bin]]
+name = "git-semantic"
+path = "src/main.rs"

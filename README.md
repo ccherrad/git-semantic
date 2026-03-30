@@ -38,7 +38,13 @@ The binary will be installed to `~/.cargo/bin/gitsem`.
 
 ```bash
 gitsem help
+# OR use as git subcommand
+git semantic help
 ```
+
+Both `gitsem` and `git-semantic` binaries are installed, so you can use either:
+- `gitsem <command>` - Standalone command
+- `git semantic <command>` - Git subcommand style
 
 If the command isn't found, ensure `~/.cargo/bin` is in your PATH:
 
@@ -193,8 +199,9 @@ gitsem show HEAD~2
 git clone https://github.com/example/myproject.git
 cd myproject
 
-# Index the last 10 commits
+# Index the last 10 commits (use either style)
 gitsem reindex HEAD~10..HEAD
+# OR: git semantic reindex HEAD~10..HEAD
 
 # Share semantic notes with team
 git push origin refs/notes/semantic
@@ -208,12 +215,15 @@ vim src/auth.rs
 
 # Create commit with semantic notes
 gitsem commit -a -m "feat: add JWT token validation"
+# OR: git semantic commit -a -m "feat: add JWT token validation"
 
 # Pull teammate's changes and sync semantics
 gitsem pull
+# OR: git semantic pull
 
 # Search for related code
 gitsem grep "token validation logic"
+# OR: git semantic grep "token validation logic"
 ```
 
 ### Example 3: Code Review
