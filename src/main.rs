@@ -9,7 +9,21 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "git-semantic")]
-#[command(about = "Semantic search layer for Git repositories", long_about = None)]
+#[command(version, about = "Semantic search layer for Git repositories")]
+#[command(long_about = "git-semantic augments Git commits with vector embeddings, enabling semantic code search.\n\n\
+Features:\n\
+  • Attach semantic notes (embeddings + context) to commits\n\
+  • Search code by meaning using natural language queries\n\
+  • Share semantic indexes with team via Git notes\n\
+  • Retroactively index existing commit history\n\n\
+Storage:\n\
+  • Git notes stored in refs/notes/semantic\n\
+  • Local SQLite index at .git/semantic.db\n\n\
+Examples:\n\
+  git semantic commit -a -m \"Add authentication\"\n\
+  git semantic reindex HEAD~10..HEAD\n\
+  git semantic grep \"error handling logic\"\n\
+  git semantic pull")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -17,28 +31,79 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Pull changes and sync semantic notes from remote")]
+    #[command(long_about = "Performs git pull and fetches refs/notes/semantic from remote.\n\n\
+Rebuilds local SQLite database from all semantic notes.\n\n\
+Example:\n\
+  git semantic pull\n\
+  git semantic pull upstream")]
     Pull {
         #[arg(help = "Remote name (default: origin)")]
         remote: Option<String>,
     },
+
+    #[command(about = "Create commit with semantic notes attached")]
+    #[command(long_about = "Creates a Git commit and attaches semantic notes containing:\n\
+  • Commit message and metadata\n\
+  • Full diff of changes\n\
+  • Vector embeddings (768-dim)\n\n\
+The note is stored in refs/notes/semantic and can be shared with:\n\
+  git push origin refs/notes/semantic\n\n\
+Examples:\n\
+  git semantic commit -a -m \"Add user login\"\n\
+  git semantic commit -m \"Fix bug in parser\"\n\
+  git semantic commit  (interactive mode)")]
     Commit {
         #[arg(short, long, help = "Commit message")]
         message: Option<String>,
         #[arg(short, long, help = "Stage all changes before committing")]
         all: bool,
     },
+
+    #[command(about = "Search code semantically using natural language")]
+    #[command(long_about = "Performs vector similarity search on indexed code.\n\n\
+Generates embedding for query and finds semantically similar code chunks\n\
+using KNN search in the local SQLite database.\n\n\
+Note: Database must be populated first via 'git semantic pull'\n\n\
+Examples:\n\
+  git semantic grep \"authentication logic\"\n\
+  git semantic grep \"error handling\" -n 5")]
     Grep {
-        #[arg(help = "Search query")]
+        #[arg(help = "Search query in natural language")]
         query: String,
         #[arg(short = 'n', long, default_value = "10", help = "Maximum number of results")]
         max_count: i64,
     },
+
+    #[command(about = "Add semantic notes to existing commits")]
+    #[command(long_about = "Retroactively adds semantic notes to commits in the specified range.\n\n\
+Useful for indexing existing repositories or adding notes to commits\n\
+created with regular 'git commit'.\n\n\
+For each commit:\n\
+  • Extracts commit message and diff\n\
+  • Generates vector embeddings\n\
+  • Attaches note to refs/notes/semantic\n\n\
+Examples:\n\
+  git semantic reindex HEAD~3..HEAD    (last 3 commits)\n\
+  git semantic reindex main..HEAD      (all commits since main)\n\
+  git semantic reindex abc123..def456  (specific range)")]
     Reindex {
-        #[arg(help = "Commit range (e.g., HEAD~3, main..HEAD)")]
+        #[arg(help = "Commit range (e.g., HEAD~3, main..HEAD, abc123..def456)")]
         range: String,
     },
+
+    #[command(about = "Display semantic note for a commit")]
+    #[command(long_about = "Shows the semantic note attached to a commit with formatted display.\n\n\
+Displays:\n\
+  • Commit SHA and metadata\n\
+  • Embedding dimensions\n\
+  • Content preview (diff and context)\n\n\
+Examples:\n\
+  git semantic show           (show HEAD)\n\
+  git semantic show abc123    (specific commit)\n\
+  git semantic show HEAD~2    (2 commits back)")]
     Show {
-        #[arg(help = "Commit to show semantic note for (default: HEAD)", default_value = "HEAD")]
+        #[arg(help = "Commit SHA or reference (default: HEAD)", default_value = "HEAD")]
         commit: String,
     },
 }
