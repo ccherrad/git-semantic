@@ -1,4 +1,4 @@
-# git-semantic
+# gitsem
 
 A semantic search layer for Git repositories that augments commits with vector embeddings, enabling AI agents and developers to search code by meaning rather than text patterns.
 
@@ -18,20 +18,26 @@ A semantic search layer for Git repositories that augments commits with vector e
 - Rust 1.65 or higher
 - Git 2.0 or higher
 
+### From crates.io
+
+```bash
+cargo install gitsem
+```
+
 ### Build from Source
 
 ```bash
-git clone https://github.com/yourusername/git-semantic.git
-cd git-semantic
+git clone https://github.com/ccherrad/gitsem.git
+cd gitsem
 cargo install --path .
 ```
 
-The binary will be installed to `~/.cargo/bin/git-semantic`.
+The binary will be installed to `~/.cargo/bin/gitsem`.
 
 ### Verify Installation
 
 ```bash
-git semantic help
+gitsem help
 ```
 
 If the command isn't found, ensure `~/.cargo/bin` is in your PATH:
@@ -50,7 +56,7 @@ Add this to your `~/.bashrc` or `~/.zshrc` to make it permanent.
 ┌─────────────────┐
 │   Git Commits   │
 └────────┬────────┘
-         │ git semantic commit/reindex
+         │ gitsem commit/reindex
          ▼
 ┌─────────────────────────────────┐
 │   Git Notes (refs/notes/semantic)│  ← Source of Truth
@@ -58,7 +64,7 @@ Add this to your `~/.bashrc` or `~/.zshrc` to make it permanent.
 │   - Diffs                        │
 │   - Vector embeddings (768-dim)  │
 └────────┬────────────────────────┘
-         │ git semantic pull
+         │ gitsem pull
          ▼
 ┌─────────────────┐
 │  SQLite (.git/  │  ← Search Index
@@ -67,7 +73,7 @@ Add this to your `~/.bashrc` or `~/.zshrc` to make it permanent.
 │    table        │
 └─────────────────┘
          │
-         ▼ git semantic grep
+         ▼ gitsem grep
 ┌─────────────────┐
 │  Vector Search  │
 │  Results        │
@@ -76,27 +82,27 @@ Add this to your `~/.bashrc` or `~/.zshrc` to make it permanent.
 
 ### Data Flow
 
-1. **Create Semantic Notes**: `git semantic commit` or `reindex` generates embeddings and stores them as Git notes
+1. **Create Semantic Notes**: `gitsem commit` or `reindex` generates embeddings and stores them as Git notes
 2. **Sync Across Team**: `git push origin refs/notes/semantic` shares notes with teammates
-3. **Build Search Index**: `git semantic pull` fetches notes and populates local SQLite database
-4. **Search**: `git semantic grep` performs KNN vector similarity search
+3. **Build Search Index**: `gitsem pull` fetches notes and populates local SQLite database
+4. **Search**: `gitsem grep` performs KNN vector similarity search
 
 ## Commands
 
-### `git semantic commit`
+### `gitsem commit`
 
 Create a commit with semantic notes attached.
 
 ```bash
 # Commit with all changes
-git semantic commit -a -m "Add user authentication"
+gitsem commit -a -m "Add user authentication"
 
 # Commit staged changes
 git add .
-git semantic commit -m "Fix login bug"
+gitsem commit -m "Fix login bug"
 
 # Interactive (prompts for message)
-git semantic commit
+gitsem commit
 ```
 
 **What it does:**
@@ -104,19 +110,19 @@ git semantic commit
 - Generates embeddings from the diff
 - Attaches semantic note to the commit in `refs/notes/semantic`
 
-### `git semantic reindex <range>`
+### `gitsem reindex <range>`
 
 Add semantic notes to existing commits retroactively.
 
 ```bash
 # Index last 3 commits
-git semantic reindex HEAD~3..HEAD
+gitsem reindex HEAD~3..HEAD
 
 # Index all commits since main
-git semantic reindex main..HEAD
+gitsem reindex main..HEAD
 
 # Index specific range
-git semantic reindex abc123..def456
+gitsem reindex abc123..def456
 ```
 
 **What it does:**
@@ -124,16 +130,16 @@ git semantic reindex abc123..def456
 - Generates embeddings for each commit's diff
 - Attaches semantic notes to existing commits
 
-### `git semantic pull [remote]`
+### `gitsem pull [remote]`
 
 Pull code changes and sync semantic notes.
 
 ```bash
 # Pull from origin (default)
-git semantic pull
+gitsem pull
 
 # Pull from upstream
-git semantic pull upstream
+gitsem pull upstream
 ```
 
 **What it does:**
@@ -141,16 +147,16 @@ git semantic pull upstream
 - Fetches `refs/notes/semantic` from remote
 - Rebuilds local SQLite database from notes
 
-### `git semantic grep <query>`
+### `gitsem grep <query>`
 
 Search code semantically using natural language.
 
 ```bash
 # Basic search
-git semantic grep "authentication logic"
+gitsem grep "authentication logic"
 
 # Limit results
-git semantic grep "error handling" -n 5
+gitsem grep "error handling" -n 5
 ```
 
 **What it does:**
@@ -158,19 +164,19 @@ git semantic grep "error handling" -n 5
 - Performs KNN vector similarity search
 - Returns semantically similar code chunks
 
-### `git semantic show [commit]`
+### `gitsem show [commit]`
 
 View semantic note attached to a commit.
 
 ```bash
 # Show note for HEAD
-git semantic show
+gitsem show
 
 # Show note for specific commit
-git semantic show abc123
+gitsem show abc123
 
 # Show note for HEAD~2
-git semantic show HEAD~2
+gitsem show HEAD~2
 ```
 
 **What it does:**
@@ -188,7 +194,7 @@ git clone https://github.com/example/myproject.git
 cd myproject
 
 # Index the last 10 commits
-git semantic reindex HEAD~10..HEAD
+gitsem reindex HEAD~10..HEAD
 
 # Share semantic notes with team
 git push origin refs/notes/semantic
@@ -201,35 +207,35 @@ git push origin refs/notes/semantic
 vim src/auth.rs
 
 # Create commit with semantic notes
-git semantic commit -a -m "feat: add JWT token validation"
+gitsem commit -a -m "feat: add JWT token validation"
 
 # Pull teammate's changes and sync semantics
-git semantic pull
+gitsem pull
 
 # Search for related code
-git semantic grep "token validation logic"
+gitsem grep "token validation logic"
 ```
 
 ### Example 3: Code Review
 
 ```bash
 # View semantic context of a commit
-git semantic show HEAD~2
+gitsem show HEAD~2
 
 # Search for similar patterns
-git semantic grep "similar authentication pattern"
+gitsem grep "similar authentication pattern"
 ```
 
 ### Example 4: Team Collaboration
 
 ```bash
 # Developer A: Create semantic commits
-git semantic commit -m "refactor: simplify error handling"
+gitsem commit -m "refactor: simplify error handling"
 git push origin main refs/notes/semantic
 
 # Developer B: Pull and sync
-git semantic pull
-git semantic grep "error handling patterns"
+gitsem pull
+gitsem grep "error handling patterns"
 ```
 
 ## Configuration
@@ -271,7 +277,7 @@ git config --add remote.origin.fetch "+refs/notes/semantic:refs/notes/semantic"
 ### Project Structure
 
 ```
-git-semantic/
+gitsem/
 ├── src/
 │   ├── main.rs       # CLI and command handlers
 │   ├── models.rs     # CodeChunk data structure

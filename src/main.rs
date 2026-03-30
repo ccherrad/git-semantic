@@ -8,10 +8,10 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "git-semantic")]
+#[command(name = "gitsem")]
 #[command(version, about = "Semantic search layer for Git repositories")]
 #[command(
-    long_about = "git-semantic augments Git commits with vector embeddings, enabling semantic code search.\n\n\
+    long_about = "gitsem augments Git commits with vector embeddings, enabling semantic code search.\n\n\
 Features:\n\
   • Attach semantic notes (embeddings + context) to commits\n\
   • Search code by meaning using natural language queries\n\
@@ -21,10 +21,10 @@ Storage:\n\
   • Git notes stored in refs/notes/semantic\n\
   • Local SQLite index at .git/semantic.db\n\n\
 Examples:\n\
-  git semantic commit -a -m \"Add authentication\"\n\
-  git semantic reindex HEAD~10..HEAD\n\
-  git semantic grep \"error handling logic\"\n\
-  git semantic pull"
+  gitsem commit -a -m \"Add authentication\"\n\
+  gitsem reindex HEAD~10..HEAD\n\
+  gitsem grep \"error handling logic\"\n\
+  gitsem pull"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -38,8 +38,8 @@ enum Commands {
         long_about = "Performs git pull and fetches refs/notes/semantic from remote.\n\n\
 Rebuilds local SQLite database from all semantic notes.\n\n\
 Example:\n\
-  git semantic pull\n\
-  git semantic pull upstream"
+  gitsem pull\n\
+  gitsem pull upstream"
     )]
     Pull {
         #[arg(help = "Remote name (default: origin)")]
@@ -55,9 +55,9 @@ Example:\n\
 The note is stored in refs/notes/semantic and can be shared with:\n\
   git push origin refs/notes/semantic\n\n\
 Examples:\n\
-  git semantic commit -a -m \"Add user login\"\n\
-  git semantic commit -m \"Fix bug in parser\"\n\
-  git semantic commit  (interactive mode)"
+  gitsem commit -a -m \"Add user login\"\n\
+  gitsem commit -m \"Fix bug in parser\"\n\
+  gitsem commit  (interactive mode)"
     )]
     Commit {
         #[arg(short, long, help = "Commit message")]
@@ -70,10 +70,10 @@ Examples:\n\
     #[command(long_about = "Performs vector similarity search on indexed code.\n\n\
 Generates embedding for query and finds semantically similar code chunks\n\
 using KNN search in the local SQLite database.\n\n\
-Note: Database must be populated first via 'git semantic pull'\n\n\
+Note: Database must be populated first via 'gitsem pull'\n\n\
 Examples:\n\
-  git semantic grep \"authentication logic\"\n\
-  git semantic grep \"error handling\" -n 5")]
+  gitsem grep \"authentication logic\"\n\
+  gitsem grep \"error handling\" -n 5")]
     Grep {
         #[arg(help = "Search query in natural language")]
         query: String,
@@ -96,9 +96,9 @@ For each commit:\n\
   • Generates vector embeddings\n\
   • Attaches note to refs/notes/semantic\n\n\
 Examples:\n\
-  git semantic reindex HEAD~3..HEAD    (last 3 commits)\n\
-  git semantic reindex main..HEAD      (all commits since main)\n\
-  git semantic reindex abc123..def456  (specific range)"
+  gitsem reindex HEAD~3..HEAD    (last 3 commits)\n\
+  gitsem reindex main..HEAD      (all commits since main)\n\
+  gitsem reindex abc123..def456  (specific range)"
     )]
     Reindex {
         #[arg(help = "Commit range (e.g., HEAD~3, main..HEAD, abc123..def456)")]
@@ -113,9 +113,9 @@ Displays:\n\
   • Embedding dimensions\n\
   • Content preview (diff and context)\n\n\
 Examples:\n\
-  git semantic show           (show HEAD)\n\
-  git semantic show abc123    (specific commit)\n\
-  git semantic show HEAD~2    (2 commits back)"
+  gitsem show           (show HEAD)\n\
+  gitsem show abc123    (specific commit)\n\
+  gitsem show HEAD~2    (2 commits back)"
     )]
     Show {
         #[arg(
@@ -572,8 +572,8 @@ fn show_semantic_note(commit: &str) -> Result<()> {
     if !show_output.status.success() {
         println!("No semantic note found for commit {}", &commit_sha[..8]);
         println!("\nTo add semantic notes:");
-        println!("  git semantic commit              (for new commits)");
-        println!("  git semantic reindex HEAD~3..HEAD (for existing commits)");
+        println!("  gitsem commit              (for new commits)");
+        println!("  gitsem reindex HEAD~3..HEAD (for existing commits)");
         return Ok(());
     }
 

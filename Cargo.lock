@@ -536,7 +536,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-semantic"
+name = "gitsem"
 version = "0.1.0"
 dependencies = [
  "anyhow",
