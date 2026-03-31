@@ -1,5 +1,6 @@
 mod db;
 mod embed;
+mod embeddings;
 mod git;
 mod models;
 
@@ -124,6 +125,32 @@ Examples:\n\
         )]
         commit: String,
     },
+
+    #[command(about = "Get and set gitsem options")]
+    #[command(long_about = "Configure gitsem settings using git config.\n\n\
+Settings are stored in .git/config under the [gitsem] section.\n\n\
+Examples:\n\
+  gitsem config --list\n\
+  gitsem config gitsem.provider onnx\n\
+  gitsem config gitsem.openai.model text-embedding-3-large\n\
+  gitsem config --get gitsem.provider\n\
+  gitsem config --unset gitsem.onnx.modelPath")]
+    Config {
+        #[arg(help = "Configuration key (e.g., gitsem.provider)")]
+        key: Option<String>,
+
+        #[arg(help = "Configuration value")]
+        value: Option<String>,
+
+        #[arg(long, help = "List all gitsem configuration")]
+        list: bool,
+
+        #[arg(long, help = "Get the value for a given key")]
+        get: bool,
+
+        #[arg(long, help = "Remove a configuration key")]
+        unset: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -144,6 +171,15 @@ fn main() -> Result<()> {
         }
         Commands::Show { commit } => {
             show_semantic_note(&commit)?;
+        }
+        Commands::Config {
+            key,
+            value,
+            list,
+            get,
+            unset,
+        } => {
+            config_command(key.as_deref(), value.as_deref(), list, get, unset)?;
         }
     }
 
@@ -607,5 +643,55 @@ fn show_semantic_note(commit: &str) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn config_command(
+    key: Option<&str>,
+    value: Option<&str>,
+    list: bool,
+    get: bool,
+    unset: bool,
+) -> Result<()> {
+    use embed::EmbeddingConfig;
+
+    if list {
+        EmbeddingConfig::show()?;
+        return Ok(());
+    }
+
+    if unset {
+        let key = key.context("Key required for --unset")?;
+        EmbeddingConfig::unset_git_config(key)?;
+        println!("Unset {}", key);
+        return Ok(());
+    }
+
+    if get {
+        let key = key.context("Key required for --get")?;
+        if let Some(value) = EmbeddingConfig::get_git_config(key) {
+            println!("{}", value);
+        } else {
+            anyhow::bail!("Configuration key '{}' not found", key);
+        }
+        return Ok(());
+    }
+
+    if let (Some(key), Some(value)) = (key, value) {
+        EmbeddingConfig::set_git_config(key, value)?;
+        println!("Set {} = {}", key, value);
+        return Ok(());
+    }
+
+    if let Some(key) = key {
+        if let Some(value) = EmbeddingConfig::get_git_config(key) {
+            println!("{}", value);
+        } else {
+            anyhow::bail!("Configuration key '{}' not found", key);
+        }
+        return Ok(());
+    }
+
+    EmbeddingConfig::show()?;
     Ok(())
 }

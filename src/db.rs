@@ -1,17 +1,37 @@
 use crate::models::CodeChunk;
 use anyhow::{Context, Result};
-use rusqlite::{Connection, ffi::sqlite3_auto_extension, params};
+use rusqlite::{ffi::sqlite3_auto_extension, params, Connection};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::PathBuf;
 
 pub struct Database {
     conn: Connection,
+    embedding_dim: usize,
 }
 
 impl Database {
     pub fn init() -> Result<Self> {
+        Self::init_with_dimension(None)
+    }
+
+    pub fn init_with_dimension(embedding_dim: Option<usize>) -> Result<Self> {
+        use crate::embed::EmbeddingConfig;
+
+        let config = EmbeddingConfig::load_or_default()?;
+        let dim = embedding_dim.unwrap_or_else(|| match config.provider {
+            crate::embed::EmbeddingProviderType::OpenAI => 1536,
+            crate::embed::EmbeddingProviderType::ONNX => config.onnx.embedding_dim,
+        });
+
         unsafe {
-            sqlite3_auto_extension(Some(std::mem::transmute::<*const (), unsafe extern "C" fn(*mut rusqlite::ffi::sqlite3, *mut *mut i8, *const rusqlite::ffi::sqlite3_api_routines) -> i32>(sqlite3_vec_init as *const ())));
+            sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(sqlite3_vec_init as *const ())));
         }
 
         let db_path = PathBuf::from(".git/semantic.db");
@@ -30,12 +50,23 @@ impl Database {
         )
         .context("Failed to create code_chunks table")?;
 
-        conn.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
-                embedding FLOAT[1536]
-            );",
-        )
-        .context("Failed to create vec_chunks virtual table")?;
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='vec_chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+            > 0;
+
+        if !table_exists {
+            let create_vec_table = format!(
+                "CREATE VIRTUAL TABLE vec_chunks USING vec0(embedding FLOAT[{}]);",
+                dim
+            );
+            conn.execute_batch(&create_vec_table)
+                .context("Failed to create vec_chunks virtual table")?;
+        }
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS vec_metadata (
@@ -50,7 +81,10 @@ impl Database {
         )
         .context("Failed to create vec_metadata table")?;
 
-        Ok(Database { conn })
+        Ok(Database {
+            conn,
+            embedding_dim: dim,
+        })
     }
 
     pub fn insert_chunk(&self, chunk: &CodeChunk) -> Result<()> {
@@ -146,13 +180,22 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let test_db_path = std::env::temp_dir().join(format!("test_semantic_{}_{}.db", std::process::id(), timestamp));
+        let test_db_path = std::env::temp_dir().join(format!(
+            "test_semantic_{}_{}.db",
+            std::process::id(),
+            timestamp
+        ));
         let _ = fs::remove_file(&test_db_path);
 
         unsafe {
-            sqlite3_auto_extension(Some(std::mem::transmute::<*const (), unsafe extern "C" fn(*mut rusqlite::ffi::sqlite3, *mut *mut i8, *const rusqlite::ffi::sqlite3_api_routines) -> i32>(
-                sqlite3_vec_init as *const ()
-            )));
+            sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(sqlite3_vec_init as *const ())));
         }
 
         let conn = Connection::open(&test_db_path)?;
@@ -166,13 +209,13 @@ mod tests {
                 content TEXT NOT NULL,
                 commit_sha TEXT NOT NULL,
                 embedding BLOB
-            );"
+            );",
         )?;
 
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
                 embedding FLOAT[1536]
-            );"
+            );",
         )?;
 
         conn.execute_batch(
@@ -184,10 +227,13 @@ mod tests {
                 end_line INTEGER NOT NULL,
                 content TEXT NOT NULL,
                 commit_sha TEXT NOT NULL
-            );"
+            );",
         )?;
 
-        Ok(Database { conn })
+        Ok(Database {
+            conn,
+            embedding_dim: 1536,
+        })
     }
 
     #[test]
