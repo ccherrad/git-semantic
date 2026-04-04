@@ -29,6 +29,18 @@ walkdir = "2.5.0"
 webpki-roots = "1.0"
 zerocopy = "0.8.14"
 
+# Tree-sitter for code chunking
+tree-sitter = "0.25"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.23"
+regex = "1.10"
+
 [[bin]]
 name = "gitsem"
 path = "src/main.rs"

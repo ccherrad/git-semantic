@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 pub struct Database {
     conn: Connection,
-    embedding_dim: usize,
 }
 
 impl Database {
@@ -44,7 +43,6 @@ impl Database {
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
                 content TEXT NOT NULL,
-                commit_sha TEXT NOT NULL,
                 embedding BLOB
             );",
         )
@@ -75,16 +73,18 @@ impl Database {
                 file_path TEXT NOT NULL,
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                commit_sha TEXT NOT NULL
+                content TEXT NOT NULL
             );",
         )
         .context("Failed to create vec_metadata table")?;
 
-        Ok(Database {
-            conn,
-            embedding_dim: dim,
-        })
+        Ok(Database { conn })
+    }
+
+    pub fn clear(&self) -> Result<()> {
+        self.conn
+            .execute_batch("DELETE FROM vec_metadata; DELETE FROM vec_chunks; DELETE FROM code_chunks;")
+            .context("Failed to clear database")
     }
 
     pub fn insert_chunk(&self, chunk: &CodeChunk) -> Result<()> {
@@ -94,37 +94,35 @@ impl Database {
             bincode::serialize(&chunk.embedding).context("Failed to serialize embedding")?;
 
         self.conn.execute(
-            "INSERT INTO code_chunks (file_path, start_line, end_line, content, commit_sha, embedding)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO code_chunks (file_path, start_line, end_line, content, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 &chunk.file_path,
                 chunk.start_line,
                 chunk.end_line,
                 &chunk.content,
-                &chunk.commit_sha,
                 &embedding_blob
             ],
         ).context("Failed to insert chunk into database")?;
 
+        let chunk_id = self.conn.last_insert_rowid();
+
         self.conn
             .execute(
-                "INSERT INTO vec_chunks (embedding) VALUES (?1)",
-                params![chunk.embedding.as_bytes()],
+                "INSERT INTO vec_chunks (rowid, embedding) VALUES (?1, ?2)",
+                params![chunk_id, chunk.embedding.as_bytes()],
             )
             .context("Failed to insert into vec_chunks")?;
 
-        let chunk_id = self.conn.last_insert_rowid();
-
         self.conn.execute(
-            "INSERT INTO vec_metadata (chunk_id, file_path, start_line, end_line, content, commit_sha)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO vec_metadata (chunk_id, file_path, start_line, end_line, content)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 chunk_id,
                 &chunk.file_path,
                 chunk.start_line,
                 chunk.end_line,
                 &chunk.content,
-                &chunk.commit_sha
             ],
         ).context("Failed to insert metadata")?;
 
@@ -135,20 +133,18 @@ impl Database {
         use zerocopy::IntoBytes;
 
         let mut stmt = self.conn.prepare(
-            "SELECT m.file_path, m.start_line, m.end_line, m.content, m.commit_sha, c.embedding, distance
+            "SELECT m.file_path, m.start_line, m.end_line, m.content, c.embedding, distance
              FROM vec_chunks v
              JOIN vec_metadata m ON v.rowid = m.chunk_id
-             JOIN code_chunks c ON c.file_path = m.file_path
-                AND c.start_line = m.start_line
-                AND c.commit_sha = m.commit_sha
+             JOIN code_chunks c ON c.id = m.chunk_id
              WHERE v.embedding MATCH ?1
                AND k = ?2
-             ORDER BY distance"
+             ORDER BY distance",
         )?;
 
         let chunks = stmt
             .query_map(params![query_embedding.as_bytes(), limit], |row| {
-                let embedding_blob: Vec<u8> = row.get(5)?;
+                let embedding_blob: Vec<u8> = row.get(4)?;
                 let embedding: Vec<f32> = bincode::deserialize(&embedding_blob)
                     .map_err(|_e| rusqlite::Error::InvalidQuery)?;
 
@@ -157,9 +153,8 @@ impl Database {
                     start_line: row.get(1)?,
                     end_line: row.get(2)?,
                     content: row.get(3)?,
-                    commit_sha: row.get(4)?,
                     embedding,
-                    distance: row.get(6).ok(),
+                    distance: row.get(5).ok(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -207,7 +202,6 @@ mod tests {
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
                 content TEXT NOT NULL,
-                commit_sha TEXT NOT NULL,
                 embedding BLOB
             );",
         )?;
@@ -225,15 +219,11 @@ mod tests {
                 file_path TEXT NOT NULL,
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                commit_sha TEXT NOT NULL
+                content TEXT NOT NULL
             );",
         )?;
 
-        Ok(Database {
-            conn,
-            embedding_dim: 1536,
-        })
+        Ok(Database { conn })
     }
 
     #[test]
@@ -250,7 +240,6 @@ mod tests {
             start_line: 1,
             end_line: 10,
             content: "test content".to_string(),
-            commit_sha: "abc123".to_string(),
             embedding: vec![0.5; 1536],
             distance: None,
         };
@@ -268,7 +257,6 @@ mod tests {
             start_line: 1,
             end_line: 5,
             content: "authentication logic".to_string(),
-            commit_sha: "commit1".to_string(),
             embedding: vec![1.0; 1536],
             distance: None,
         };
@@ -278,7 +266,6 @@ mod tests {
             start_line: 10,
             end_line: 20,
             content: "database connection".to_string(),
-            commit_sha: "commit2".to_string(),
             embedding: vec![0.5; 1536],
             distance: None,
         };
@@ -302,7 +289,6 @@ mod tests {
             start_line: 1,
             end_line: 5,
             content: "test".to_string(),
-            commit_sha: "abc".to_string(),
             embedding: vec![1.0; 1536],
             distance: None,
         };
