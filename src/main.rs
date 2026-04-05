@@ -7,13 +7,17 @@ mod semantic_branch;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
+use std::time::Instant;
 
-type EmbedResult = (
-    Vec<(String, Vec<semantic_branch::StoredChunk>)>,
-    usize,
-    usize,
-);
+struct IndexStats {
+    indexed: usize,
+    skipped: usize,
+    resumed: usize,
+    chunks: usize,
+    deleted: usize,
+}
 
 #[derive(Parser)]
 #[command(name = "gitsem")]
@@ -109,31 +113,49 @@ fn collect_files(repo_path: &PathBuf) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn embed_files(
-    file_paths: &[PathBuf],
-    repo_path: &PathBuf,
-    provider: &mut dyn embed::EmbeddingProvider,
-) -> Result<EmbedResult> {
-    let mut file_chunks = Vec::new();
-    let mut total_chunks = 0;
-    let mut skipped = 0;
+fn make_progress_bar(total: usize) -> ProgressBar {
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::with_template("{bar:40.green/black} {pos}/{len} {wide_msg}")
+            .unwrap()
+            .progress_chars("█▓░"),
+    );
+    pb
+}
 
-    for file_path in file_paths {
+fn index_files_streaming(
+    files: &[(PathBuf, String)],
+    session: &semantic_branch::IndexSession,
+    provider: &mut dyn embed::EmbeddingProvider,
+) -> Result<IndexStats> {
+    let pb = make_progress_bar(files.len());
+    let mut stats = IndexStats {
+        indexed: 0,
+        skipped: 0,
+        resumed: 0,
+        chunks: 0,
+        deleted: 0,
+    };
+
+    for (file_path, relative) in files {
+        pb.set_message(relative.clone());
+
+        if session.already_indexed(relative) {
+            stats.resumed += 1;
+            pb.inc(1);
+            continue;
+        }
+
         let content = match std::fs::read_to_string(file_path) {
             Ok(c) => c,
             Err(_) => {
-                skipped += 1;
+                stats.skipped += 1;
+                pb.inc(1);
                 continue;
             }
         };
 
-        let relative = file_path
-            .strip_prefix(repo_path)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .to_string();
-
-        let code_chunks = chunking::chunk_code(&content, Some(&relative))?;
+        let code_chunks = chunking::chunk_code(&content, Some(relative))?;
         let mut stored: Vec<semantic_branch::StoredChunk> = Vec::new();
 
         for code_chunk in code_chunks {
@@ -148,17 +170,21 @@ fn embed_files(
                 embedding,
             });
 
-            total_chunks += 1;
+            stats.chunks += 1;
         }
 
-        file_chunks.push((relative, stored));
+        session.write_file(relative, &stored)?;
+        stats.indexed += 1;
+        pb.inc(1);
     }
 
-    Ok((file_chunks, total_chunks, skipped))
+    pb.finish_and_clear();
+    Ok(stats)
 }
 
 fn index_codebase() -> Result<()> {
     let repo_path = PathBuf::from(".");
+    let started = Instant::now();
 
     let config = embed::EmbeddingConfig::load_or_default().unwrap_or_default();
     let mut provider = embed::create_provider(&config)?;
@@ -166,79 +192,108 @@ fn index_codebase() -> Result<()> {
 
     match semantic_branch::read_last_indexed_sha(&repo_path) {
         Some(last_sha) => {
-            println!("Last indexed SHA: {}", &last_sha[..8.min(last_sha.len())]);
+            println!("Last indexed: {}", &last_sha[..8.min(last_sha.len())]);
 
             let changes = semantic_branch::get_changed_files(&repo_path, &last_sha)
                 .context("Failed to compute changed files")?;
 
             if changes.is_empty() {
-                println!("Nothing changed since last index.");
+                println!("Already up to date.");
                 return Ok(());
             }
 
-            let to_embed: Vec<PathBuf> = changes
+            let to_embed: Vec<(PathBuf, String)> = changes
                 .iter()
                 .filter_map(|c| match c {
-                    semantic_branch::FileChange::AddedOrModified(p) => Some(repo_path.join(p)),
-                    semantic_branch::FileChange::Renamed { to, .. } => Some(repo_path.join(to)),
+                    semantic_branch::FileChange::AddedOrModified(p) => {
+                        Some((repo_path.join(p), p.clone()))
+                    }
+                    semantic_branch::FileChange::Renamed { to, .. } => {
+                        Some((repo_path.join(to), to.clone()))
+                    }
                     semantic_branch::FileChange::Deleted(_) => None,
                 })
                 .collect();
 
-            let deleted = changes
+            let n_deleted = changes
                 .iter()
                 .filter(|c| matches!(c, semantic_branch::FileChange::Deleted(_)))
                 .count();
-            let renamed = changes
-                .iter()
-                .filter(|c| matches!(c, semantic_branch::FileChange::Renamed { .. }))
-                .count();
 
             println!(
-                "Changes: {} added/modified, {} deleted, {} renamed",
+                "Changes since last index: {} to embed, {} to delete",
                 to_embed.len(),
-                deleted,
-                renamed,
+                n_deleted,
             );
 
-            let (file_chunks, total_chunks, skipped) =
-                embed_files(&to_embed, &repo_path, provider.as_mut())?;
+            let session = semantic_branch::IndexSession::open(&repo_path, true)?;
 
-            println!(
-                "Generated {} chunks from {} files ({} skipped)",
-                total_chunks,
-                to_embed.len() - skipped,
-                skipped
-            );
+            for change in &changes {
+                if let semantic_branch::FileChange::Deleted(p)
+                | semantic_branch::FileChange::Renamed { from: p, .. } = change
+                {
+                    session.delete_file(p)?;
+                }
+            }
 
-            println!("Updating semantic branch...");
-            semantic_branch::apply_incremental_changes(&repo_path, &changes, &file_chunks)
-                .context("Failed to update semantic branch")?;
+            let stats = index_files_streaming(&to_embed, &session, provider.as_mut())?;
+
+            session.commit()?;
+
+            print_summary(&stats, started);
         }
         None => {
             let files = collect_files(&repo_path)?;
+            let files: Vec<(PathBuf, String)> = files
+                .into_iter()
+                .map(|p| {
+                    let rel = p
+                        .strip_prefix(&repo_path)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .to_string();
+                    (p, rel)
+                })
+                .collect();
+
             println!("Full index: {} tracked files", files.len());
 
-            let (file_chunks, total_chunks, skipped) =
-                embed_files(&files, &repo_path, provider.as_mut())?;
+            let session = semantic_branch::IndexSession::open(&repo_path, false)?;
 
-            println!(
-                "Generated {} chunks from {} files ({} skipped)",
-                total_chunks,
-                files.len() - skipped,
-                skipped
-            );
+            if session.has_partial_state() {
+                println!("Resuming interrupted index...");
+            }
 
-            println!("Writing to semantic branch...");
-            semantic_branch::write_chunks_to_branch(&repo_path, &file_chunks)
-                .context("Failed to write to semantic branch")?;
+            let stats = index_files_streaming(&files, &session, provider.as_mut())?;
+
+            session.commit()?;
+
+            print_summary(&stats, started);
         }
     }
 
-    println!("Done. Run `git-semantic hydrate` to populate the local search index.");
+    println!("Run `git-semantic hydrate` to populate the local search index.");
     println!("Run `git push origin semantic` to share with the team.");
 
     Ok(())
+}
+
+fn print_summary(stats: &IndexStats, started: Instant) {
+    let elapsed = started.elapsed();
+    let secs = elapsed.as_secs_f32();
+    println!(
+        "Done in {:.1}s — {} files indexed, {} chunks, {} skipped, {} deleted{}",
+        secs,
+        stats.indexed,
+        stats.chunks,
+        stats.skipped,
+        stats.deleted,
+        if stats.resumed > 0 {
+            format!(", {} resumed", stats.resumed)
+        } else {
+            String::new()
+        }
+    );
 }
 
 fn hydrate_from_branch() -> Result<()> {

@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SEMANTIC_BRANCH: &str = "semantic";
 const INDEXED_AT_FILE: &str = ".indexed-at";
+const INDEX_STATE_FILE: &str = ".index-state";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StoredChunk {
@@ -73,62 +75,162 @@ pub fn get_changed_files(repo_path: &Path, since_sha: &str) -> Result<Vec<FileCh
     Ok(changes)
 }
 
-pub fn write_chunks_to_branch(
-    repo_path: &Path,
-    file_chunks: &[(String, Vec<StoredChunk>)],
-) -> Result<()> {
-    let worktree_path = repo_path.join(".git").join("semantic-worktree");
+pub struct IndexSession {
+    repo_path: PathBuf,
+    worktree_path: PathBuf,
+    already_indexed: HashSet<String>,
+}
 
-    ensure_semantic_branch(repo_path)?;
-    setup_worktree(repo_path, &worktree_path)?;
+impl IndexSession {
+    pub fn open(repo_path: &Path, incremental: bool) -> Result<Self> {
+        let worktree_path = repo_path.join(".git").join("semantic-worktree");
 
-    for (relative_path, chunks) in file_chunks {
-        write_chunk_file(&worktree_path, relative_path, chunks)?;
+        if !incremental {
+            ensure_semantic_branch(repo_path)?;
+        }
+
+        setup_worktree(repo_path, &worktree_path)?;
+
+        let already_indexed = read_index_state(&worktree_path);
+
+        Ok(Self {
+            repo_path: repo_path.to_path_buf(),
+            worktree_path,
+            already_indexed,
+        })
     }
 
-    write_indexed_at(repo_path, &worktree_path)?;
-    commit_worktree(repo_path, &worktree_path)?;
-    remove_worktree(repo_path, &worktree_path)?;
+    pub fn already_indexed(&self, relative_path: &str) -> bool {
+        self.already_indexed.contains(relative_path)
+    }
 
+    pub fn has_partial_state(&self) -> bool {
+        !self.already_indexed.is_empty()
+    }
+
+    pub fn write_file(&self, relative_path: &str, chunks: &[StoredChunk]) -> Result<()> {
+        write_chunk_file(&self.worktree_path, relative_path, chunks)?;
+        append_index_state(&self.worktree_path, relative_path)?;
+        Ok(())
+    }
+
+    pub fn delete_file(&self, relative_path: &str) -> Result<()> {
+        let dest = self.worktree_path.join(relative_path);
+        if dest.exists() {
+            std::fs::remove_file(&dest)
+                .with_context(|| format!("Failed to remove {}", relative_path))?;
+        }
+        Ok(())
+    }
+
+    pub fn commit(self) -> Result<()> {
+        write_indexed_at(&self.repo_path, &self.worktree_path)?;
+        clear_index_state(&self.worktree_path)?;
+        commit_worktree(&self.repo_path, &self.worktree_path)?;
+        remove_worktree(&self.repo_path, &self.worktree_path)?;
+        Ok(())
+    }
+}
+
+fn read_index_state(worktree_path: &Path) -> HashSet<String> {
+    let state_file = worktree_path.join(INDEX_STATE_FILE);
+    match std::fs::read_to_string(state_file) {
+        Ok(content) => content.lines().map(|l| l.to_string()).collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+fn append_index_state(worktree_path: &Path, relative_path: &str) -> Result<()> {
+    use std::io::Write;
+    let state_file = worktree_path.join(INDEX_STATE_FILE);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_file)
+        .context("Failed to open .index-state")?;
+    writeln!(file, "{}", relative_path).context("Failed to write .index-state")?;
     Ok(())
 }
 
-pub fn apply_incremental_changes(
-    repo_path: &Path,
-    changes: &[FileChange],
-    file_chunks: &[(String, Vec<StoredChunk>)],
-) -> Result<()> {
+fn clear_index_state(worktree_path: &Path) -> Result<()> {
+    let state_file = worktree_path.join(INDEX_STATE_FILE);
+    if state_file.exists() {
+        std::fs::remove_file(state_file).context("Failed to remove .index-state")?;
+    }
+    Ok(())
+}
+
+pub fn read_chunks_from_branch(repo_path: &Path) -> Result<Vec<(String, Vec<StoredChunk>)>> {
     let worktree_path = repo_path.join(".git").join("semantic-worktree");
 
-    setup_worktree(repo_path, &worktree_path)?;
+    let fetch_result = Command::new("git")
+        .current_dir(repo_path)
+        .args([
+            "fetch",
+            "origin",
+            &format!("{}:{}", SEMANTIC_BRANCH, SEMANTIC_BRANCH),
+        ])
+        .output();
 
-    for change in changes {
-        match change {
-            FileChange::Deleted(path) => {
-                let dest = worktree_path.join(path);
-                if dest.exists() {
-                    std::fs::remove_file(&dest)
-                        .with_context(|| format!("Failed to remove {}", path))?;
-                }
-            }
-            FileChange::Renamed { from, to: _ } => {
-                let old_dest = worktree_path.join(from);
-                if old_dest.exists() {
-                    std::fs::remove_file(&old_dest)
-                        .with_context(|| format!("Failed to remove renamed file {}", from))?;
-                }
-            }
-            FileChange::AddedOrModified(_) => {}
+    if let Ok(out) = fetch_result {
+        if !out.status.success() {
+            println!("  (no remote semantic branch, using local)");
         }
     }
 
-    for (relative_path, chunks) in file_chunks {
-        write_chunk_file(&worktree_path, relative_path, chunks)?;
+    let branch_exists = Command::new("git")
+        .current_dir(repo_path)
+        .args(["rev-parse", "--verify", SEMANTIC_BRANCH])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !branch_exists {
+        anyhow::bail!("Semantic branch does not exist. Run `git-semantic index` first.");
     }
 
-    write_indexed_at(repo_path, &worktree_path)?;
-    commit_worktree(repo_path, &worktree_path)?;
+    setup_worktree(repo_path, &worktree_path)?;
+
+    let mut result = Vec::new();
+    collect_chunks_from_dir(&worktree_path, &worktree_path, &mut result)?;
+
     remove_worktree(repo_path, &worktree_path)?;
+
+    Ok(result)
+}
+
+fn collect_chunks_from_dir(
+    base: &Path,
+    dir: &Path,
+    result: &mut Vec<(String, Vec<StoredChunk>)>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("Failed to read dir {:?}", dir))? {
+        let entry = entry?;
+        let path = entry.path();
+
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name == ".git" || name == INDEXED_AT_FILE || name == INDEX_STATE_FILE {
+            continue;
+        }
+
+        if path.is_dir() {
+            collect_chunks_from_dir(base, &path, result)?;
+        } else {
+            let relative = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", relative))?;
+
+            let chunks: Vec<StoredChunk> = serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {}", relative))?;
+
+            result.push((relative, chunks));
+        }
+    }
 
     Ok(())
 }
@@ -163,81 +265,6 @@ fn write_indexed_at(repo_path: &Path, worktree_path: &Path) -> Result<()> {
 
     std::fs::write(worktree_path.join(INDEXED_AT_FILE), &head_sha)
         .context("Failed to write .indexed-at")?;
-
-    Ok(())
-}
-
-pub fn read_chunks_from_branch(repo_path: &Path) -> Result<Vec<(String, Vec<StoredChunk>)>> {
-    let worktree_path = repo_path.join(".git").join("semantic-worktree");
-
-    let fetch_result = Command::new("git")
-        .current_dir(repo_path)
-        .args([
-            "fetch",
-            "origin",
-            &format!("{}:{}", SEMANTIC_BRANCH, SEMANTIC_BRANCH),
-        ])
-        .output();
-
-    if let Ok(out) = fetch_result {
-        if !out.status.success() {
-            println!("  (no remote semantic branch, using local)");
-        }
-    }
-
-    let branch_exists = Command::new("git")
-        .current_dir(repo_path)
-        .args(["rev-parse", "--verify", SEMANTIC_BRANCH])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !branch_exists {
-        anyhow::bail!("Semantic branch does not exist. Run `gitsem index` first.");
-    }
-
-    setup_worktree(repo_path, &worktree_path)?;
-
-    let mut result = Vec::new();
-    collect_chunks_from_dir(&worktree_path, &worktree_path, &mut result)?;
-
-    remove_worktree(repo_path, &worktree_path)?;
-
-    Ok(result)
-}
-
-fn collect_chunks_from_dir(
-    base: &Path,
-    dir: &Path,
-    result: &mut Vec<(String, Vec<StoredChunk>)>,
-) -> Result<()> {
-    for entry in std::fs::read_dir(dir).with_context(|| format!("Failed to read dir {:?}", dir))? {
-        let entry = entry?;
-        let path = entry.path();
-
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name == ".git" || name == INDEXED_AT_FILE {
-            continue;
-        }
-
-        if path.is_dir() {
-            collect_chunks_from_dir(base, &path, result)?;
-        } else {
-            let relative = path
-                .strip_prefix(base)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read {}", relative))?;
-
-            let chunks: Vec<StoredChunk> = serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {}", relative))?;
-
-            result.push((relative, chunks));
-        }
-    }
 
     Ok(())
 }
@@ -318,6 +345,14 @@ fn setup_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
             ])
             .output()
             .ok();
+        if worktree_path.exists() {
+            std::fs::remove_dir_all(worktree_path).ok();
+        }
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["worktree", "prune"])
+            .output()
+            .ok();
     }
 
     let out = Command::new("git")
@@ -367,7 +402,6 @@ fn commit_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
         .context("Failed to check worktree status")?;
 
     if status.success() {
-        println!("  Semantic branch already up to date.");
         return Ok(());
     }
 
