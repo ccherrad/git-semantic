@@ -128,6 +128,18 @@ git-semantic grep "authentication logic"
 git-semantic grep "error handling" -n 5
 ```
 
+### `git-semantic agentic-setup`
+
+Injects code search instructions into `CLAUDE.md` so coding agents automatically use `git-semantic grep` instead of `git grep`.
+
+```bash
+git-semantic agentic-setup
+```
+
+- Appends instructions to an existing `CLAUDE.md`, or creates one if it doesn't exist
+- Idempotent — safe to run multiple times
+- Works with Claude Code, Cursor, GitHub Copilot (via `.cursor/rules` or `.github/copilot-instructions.md` equivalents)
+
 ### `git-semantic config`
 
 Configure the embedding provider.

@@ -48,6 +48,9 @@ enum Commands {
         max_count: i64,
     },
 
+    #[command(about = "Inject agent instructions into CLAUDE.md")]
+    AgenticSetup,
+
     #[command(about = "Get and set gitsem options")]
     Config {
         #[arg(help = "Configuration key (e.g., gitsem.provider)")]
@@ -79,6 +82,9 @@ fn main() -> Result<()> {
         }
         Commands::Grep { query, max_count } => {
             grep_semantic(&query, max_count)?;
+        }
+        Commands::AgenticSetup => {
+            agentic_setup()?;
         }
         Commands::Config {
             key,
@@ -358,6 +364,43 @@ fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
         println!("  {}", chunk.content.lines().next().unwrap_or(""));
     }
 
+    Ok(())
+}
+
+fn agentic_setup() -> Result<()> {
+    const MARKER: &str = "<!-- gitsem:agentic-setup -->";
+    const INSTRUCTIONS: &str = r#"<!-- gitsem:agentic-setup -->
+## Code Search
+
+Use `gitsem grep "<natural language query>"` instead of `git grep` or `grep` for all code searches.
+
+Queries must describe intent, not syntax:
+- BAD: `gitsem grep "fn authenticate"` — this is a keyword, not a query
+- GOOD: `gitsem grep "user authentication and session handling"`
+- BAD: `gitsem grep "impl Display"`
+- GOOD: `gitsem grep "how types are formatted for display output"`
+
+Use `-n` to control result count (default 10): `gitsem grep "query" -n 5`
+
+Results show `[score] file:start-end` followed by a preview line. Lower score = more similar.
+<!-- end gitsem:agentic-setup -->"#;
+
+    let claude_md = PathBuf::from("CLAUDE.md");
+
+    if claude_md.exists() {
+        let existing = std::fs::read_to_string(&claude_md)?;
+        if existing.contains(MARKER) {
+            println!("CLAUDE.md already contains gitsem instructions — nothing to do.");
+            return Ok(());
+        }
+        let mut file = std::fs::OpenOptions::new().append(true).open(&claude_md)?;
+        use std::io::Write;
+        write!(file, "\n\n{}", INSTRUCTIONS)?;
+    } else {
+        std::fs::write(&claude_md, INSTRUCTIONS)?;
+    }
+
+    println!("Injected gitsem instructions into CLAUDE.md.");
     Ok(())
 }
 
