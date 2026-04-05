@@ -17,118 +17,28 @@ src/chunking/mod.rs  →        src/chunking/mod.rs
 3. Contributors run `git fetch origin semantic` + `git-semantic hydrate` to populate their local SQLite search index — no re-embedding needed
 4. `git-semantic grep` runs KNN vector similarity search against the local index
 
-## Indexing Strategies
+## Sharing Embeddings
 
-Two strategies are supported and can be used independently or together.
+Indexing only needs to happen once — whoever runs it pushes the `semantic` branch and the whole team benefits. Nobody else needs an API key or has to re-embed anything.
 
-### Strategy 1: Local Indexing
+You can run indexing manually from any machine, or automate it in your CI/CD pipeline so embeddings stay fresh after every merge.
 
-A developer (or maintainer) runs indexing on their machine and pushes the semantic branch. Teammates pull and hydrate — no API key or re-embedding needed on their end.
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Maintainer / designated indexer                    │
-│                                                     │
-│  git-semantic index   ← embeds all files locally   │
-│  git push origin semantic                           │
-└────────────────────────┬────────────────────────────┘
-                         │
-          ┌──────────────▼──────────────┐
-          │       origin/semantic       │
-          └──────────────┬──────────────┘
-                         │
-        ┌────────────────▼────────────────┐
-        │  Any contributor                │
-        │                                 │
-        │  git fetch origin semantic      │
-        │  git-semantic hydrate           │
-        │  git-semantic grep "..."        │
-        └─────────────────────────────────┘
-```
-
-**When to use:** Small teams, cost-sensitive setups, or when you prefer full control over when embeddings are regenerated.
-
-### Strategy 2: CI/CD Continuous Indexing
-
-The CI pipeline runs `git-semantic index` automatically on every push to the main branch and pushes the updated semantic branch. The team always has fresh embeddings without anyone having to run indexing manually.
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Developer pushes to main                           │
-└────────────────────────┬────────────────────────────┘
-                         │
-          ┌──────────────▼──────────────┐
-          │  CI pipeline (GitHub        │
-          │  Actions / GitLab CI / etc) │
-          │                             │
-          │  git-semantic index         │
-          │  git push origin semantic   │
-          └──────────────┬──────────────┘
-                         │
-          ┌──────────────▼──────────────┐
-          │       origin/semantic       │
-          └──────────────┬──────────────┘
-                         │
-        ┌────────────────▼────────────────┐
-        │  Any contributor                │
-        │                                 │
-        │  git fetch origin semantic      │
-        │  git-semantic hydrate           │
-        │  git-semantic grep "..."        │
-        └─────────────────────────────────┘
-```
-
-**When to use:** Teams that want always-fresh embeddings with zero manual steps. Requires an API key configured as a CI secret (for OpenAI) or a bundled ONNX model.
-
-### Comparing the two strategies
-
-| | Local | CI/CD |
-|---|---|---|
-| Who runs indexing | Designated person | Automated on push |
-| Embedding freshness | Manual, on demand | Automatic on every merge |
-| API key exposure | Developer's machine only | CI secret |
-| Setup complexity | None | CI workflow + secret |
-| Cost control | Full | Per-push, minimal (incremental by default) |
-
-## Installation
-
-### Prerequisites
-
-- Rust 1.65 or higher
-- Git 2.0 or higher
-
-### From crates.io
+### Manual
 
 ```bash
-cargo install git-semantic
-```
-
-### Build from Source
-
-```bash
-git clone https://github.com/ccherrad/git-semantic.git
-cd git-semantic
-cargo install --path .
-```
-
-## Workflow
-
-### Local Strategy
-
-```bash
-# Run once (or when you want to refresh embeddings)
+# Anyone with an API key runs this once (or after significant changes)
 git-semantic index
 git push origin semantic
 
-# Contributors
+# Everyone else
 git fetch origin semantic
 git-semantic hydrate
-git-semantic grep "authentication middleware"
+git-semantic grep "..."
 ```
 
-### CI/CD Strategy (GitHub Actions)
+### Automated (GitHub Actions)
 
-Add `.github/workflows/semantic-index.yml` to your repository:
+Add `.github/workflows/semantic-index.yml` to your repository and indexing happens automatically on every merge to main:
 
 ```yaml
 name: Semantic Index
@@ -161,12 +71,25 @@ jobs:
           git push origin semantic
 ```
 
-Contributors still just run:
+## Installation
+
+### Prerequisites
+
+- Rust 1.65 or higher
+- Git 2.0 or higher
+
+### From crates.io
 
 ```bash
-git fetch origin semantic
-git-semantic hydrate
-git-semantic grep "..."
+cargo install git-semantic
+```
+
+### Build from Source
+
+```bash
+git clone https://github.com/ccherrad/git-semantic.git
+cd git-semantic
+cargo install --path .
 ```
 
 ## Commands
