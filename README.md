@@ -1,14 +1,21 @@
 # gitsem
 
-Semantic search for your codebase. Walks all tracked files, chunks them by language using tree-sitter, and builds a local vector index — so you can search code by meaning rather than text patterns.
+Semantic search for your codebase. Parses every tracked file with tree-sitter, generates vector embeddings per chunk, and stores them on a dedicated orphan Git branch that mirrors your source tree — so the whole team can share embeddings without re-indexing.
 
-## Features
+## How It Works
 
-- **File-level indexing**: Chunks every tracked file by language using tree-sitter (functions, classes, structs, impls, etc.)
-- **Vector Search**: Search code using natural language queries
-- **Language-aware**: Supports Rust, Python, JavaScript, TypeScript, Java, C, C++, Go
-- **Local index**: SQLite + sqlite-vec stored at `.git/semantic.db`
-- **Configurable embeddings**: OpenAI or local ONNX models
+```
+main branch                   semantic branch (orphan)
+──────────────────            ──────────────────────────────
+src/main.rs          →        src/main.rs       ← [{start_line, end_line, text, embedding}, ...]
+src/db.rs            →        src/db.rs         ← [{...}, ...]
+src/chunking/mod.rs  →        src/chunking/mod.rs
+```
+
+1. `gitsem index` parses all tracked files with tree-sitter, embeds each chunk, and commits the mirrored JSON files to the `semantic` orphan branch
+2. `git push origin semantic` shares the embeddings with the team
+3. Contributors run `git fetch origin semantic` + `gitsem hydrate` to populate their local SQLite search index — no re-embedding needed
+4. `gitsem grep` runs KNN vector similarity search against the local index
 
 ## Installation
 
@@ -35,42 +42,47 @@ Both `gitsem` and `git-semantic` binaries are installed:
 - `gitsem <command>` — standalone
 - `git semantic <command>` — git subcommand style
 
-If not found, add `~/.cargo/bin` to your PATH.
+## Workflow
 
-## How It Works
+### Maintainer / CI
 
-```
-git ls-files
-     │
-     ▼
-tree-sitter chunking (per language)
-     │
-     ▼
-embedding (OpenAI / ONNX)
-     │
-     ▼
-SQLite + vec0 (.git/semantic.db)
-     │
-     ▼ gitsem grep
-vector similarity search
+```bash
+gitsem index
+git push origin semantic
 ```
 
-1. `gitsem index` walks all files tracked by git (respects `.gitignore`)
-2. Each file is parsed by tree-sitter and split into top-level constructs
-3. Each chunk is embedded and stored in the local SQLite index
-4. `gitsem grep` embeds your query and runs KNN search against the index
+### Contributors
+
+```bash
+git fetch origin semantic
+gitsem hydrate
+gitsem grep "authentication middleware"
+```
 
 ## Commands
 
 ### `gitsem index`
 
-Index all tracked files in the repository.
+Parses and embeds all files tracked by git, then commits the result to the `semantic` orphan branch.
 
 ```bash
 gitsem index
 ```
 
-Clears the existing index and rebuilds it from scratch. Binary files and files with unrecognized extensions are skipped. Unrecognized-language files are stored as a single chunk.
+- Respects `.gitignore` (uses `git ls-files`)
+- Skips binary files
+- Files with unrecognized extensions are stored as a single chunk
+- Creates the `semantic` branch automatically on first run
+
+### `gitsem hydrate`
+
+Reads the `semantic` branch and populates the local `.git/semantic.db` search index.
+
+```bash
+gitsem hydrate
+```
+
+Attempts to fetch `origin/semantic` first, then falls back to the local branch.
 
 ### `gitsem grep <query>`
 
@@ -83,7 +95,7 @@ gitsem grep "error handling" -n 5
 
 ### `gitsem config`
 
-Get and set embedding provider configuration.
+Configure the embedding provider.
 
 ```bash
 gitsem config --list
@@ -109,32 +121,30 @@ gitsem config gitsem.provider onnx
 gitsem config gitsem.onnx.modelPath /path/to/model.onnx
 ```
 
-## Development
+## Supported Languages
 
-### Project Structure
+Rust, Python, JavaScript, TypeScript, Java, C, C++, Go
+
+## Project Structure
 
 ```
 gitsem/
 ├── src/
-│   ├── main.rs          # CLI and command handlers
-│   ├── models.rs        # CodeChunk data structure
-│   ├── db.rs            # SQLite database with vec0 table
-│   ├── embed.rs         # Embedding generation
-│   ├── embeddings/      # OpenAI and ONNX providers
-│   └── chunking/        # tree-sitter parsing and language detection
+│   ├── main.rs              # CLI and command handlers
+│   ├── models.rs            # CodeChunk data structure
+│   ├── db.rs                # SQLite + sqlite-vec search index
+│   ├── embed.rs             # Embedding generation
+│   ├── semantic_branch.rs   # Orphan branch read/write via git worktree
+│   ├── embeddings/          # OpenAI and ONNX provider implementations
+│   └── chunking/            # tree-sitter parsing and language detection
 ├── Cargo.toml
 └── README.md
 ```
 
-### Building
+## Building
 
 ```bash
 cargo build --release
-```
-
-### Testing
-
-```bash
 cargo test
 ```
 
