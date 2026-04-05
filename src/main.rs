@@ -3,6 +3,7 @@ mod db;
 mod embed;
 mod embeddings;
 mod models;
+mod semantic_branch;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -18,8 +19,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Index all files in the repository")]
+    #[command(about = "Index all files and store embeddings on the semantic branch")]
     Index,
+
+    #[command(about = "Hydrate local DB from the semantic branch")]
+    Hydrate,
 
     #[command(about = "Search code semantically using natural language")]
     Grep {
@@ -59,6 +63,9 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Index => {
             index_codebase()?;
+        }
+        Commands::Hydrate => {
+            hydrate_from_branch()?;
         }
         Commands::Grep { query, max_count } => {
             grep_semantic(&query, max_count)?;
@@ -102,9 +109,7 @@ fn index_codebase() -> Result<()> {
     let files = collect_files(&repo_path)?;
     println!("Found {} tracked files", files.len());
 
-    let db = db::Database::init().context("Failed to initialize database")?;
-    db.clear().context("Failed to clear existing index")?;
-
+    let mut file_chunks: Vec<(String, Vec<semantic_branch::StoredChunk>)> = Vec::new();
     let mut total_chunks = 0;
     let mut skipped = 0;
 
@@ -124,31 +129,72 @@ fn index_codebase() -> Result<()> {
             .to_string();
 
         let code_chunks = chunking::chunk_code(&content, Some(&relative))?;
+        let mut stored: Vec<semantic_branch::StoredChunk> = Vec::new();
 
         for code_chunk in code_chunks {
-            let vector_embedding = embed::generate_embedding(&code_chunk.text)
+            let embedding = embed::generate_embedding(&code_chunk.text)
                 .context("Failed to generate embedding")?;
 
-            db.insert_chunk(&models::CodeChunk {
-                file_path: relative.clone(),
-                start_line: code_chunk.start_line as i64,
-                end_line: code_chunk.end_line as i64,
-                content: code_chunk.text,
-                embedding: vector_embedding,
-                distance: None,
-            })
-            .context("Failed to insert chunk")?;
+            stored.push(semantic_branch::StoredChunk {
+                start_line: code_chunk.start_line,
+                end_line: code_chunk.end_line,
+                text: code_chunk.text,
+                embedding,
+            });
 
             total_chunks += 1;
         }
+
+        file_chunks.push((relative, stored));
     }
 
     println!(
-        "Indexed {} chunks from {} files ({} skipped)",
+        "Generated {} chunks from {} files ({} skipped)",
         total_chunks,
         files.len() - skipped,
         skipped
     );
+
+    println!("Writing to semantic branch...");
+    semantic_branch::write_chunks_to_branch(&repo_path, &file_chunks)
+        .context("Failed to write to semantic branch")?;
+
+    println!("Done. Run `gitsem hydrate` to populate the local search index.");
+    println!("Run `git push origin semantic` to share with the team.");
+
+    Ok(())
+}
+
+fn hydrate_from_branch() -> Result<()> {
+    let repo_path = PathBuf::from(".");
+
+    println!("Reading chunks from semantic branch...");
+    let file_chunks = semantic_branch::read_chunks_from_branch(&repo_path)
+        .context("Failed to read from semantic branch")?;
+
+    let total_files = file_chunks.len();
+    let total_chunks: usize = file_chunks.iter().map(|(_, c)| c.len()).sum();
+
+    println!("Found {} files, {} chunks total", total_files, total_chunks);
+
+    let db = db::Database::init().context("Failed to initialize database")?;
+    db.clear().context("Failed to clear existing index")?;
+
+    for (file_path, chunks) in &file_chunks {
+        for chunk in chunks {
+            db.insert_chunk(&models::CodeChunk {
+                file_path: file_path.clone(),
+                start_line: chunk.start_line as i64,
+                end_line: chunk.end_line as i64,
+                content: chunk.text.clone(),
+                embedding: chunk.embedding.clone(),
+                distance: None,
+            })
+            .context("Failed to insert chunk")?;
+        }
+    }
+
+    println!("Hydrated {} chunks into local index.", total_chunks);
 
     Ok(())
 }
@@ -164,7 +210,7 @@ fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
         .context("Failed to search database")?;
 
     if results.is_empty() {
-        println!("No results found. Run `gitsem index` first.");
+        println!("No results found. Run `gitsem hydrate` first.");
         return Ok(());
     }
 
@@ -178,10 +224,7 @@ fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
             "[{}] {}:{}-{}",
             dist, chunk.file_path, chunk.start_line, chunk.end_line
         );
-        println!(
-            "  {}",
-            chunk.content.lines().next().unwrap_or("")
-        );
+        println!("  {}", chunk.content.lines().next().unwrap_or(""));
     }
 
     Ok(())
