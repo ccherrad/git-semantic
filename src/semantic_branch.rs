@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 const SEMANTIC_BRANCH: &str = "semantic";
+const INDEXED_AT_FILE: &str = ".indexed-at";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StoredChunk {
@@ -11,6 +12,65 @@ pub struct StoredChunk {
     pub end_line: usize,
     pub text: String,
     pub embedding: Vec<f32>,
+}
+
+pub enum FileChange {
+    AddedOrModified(String),
+    Deleted(String),
+    Renamed { from: String, to: String },
+}
+
+pub fn read_last_indexed_sha(repo_path: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .current_dir(repo_path)
+        .args(["show", &format!("{}:{}", SEMANTIC_BRANCH, INDEXED_AT_FILE)])
+        .output()
+        .ok()?;
+
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+pub fn get_changed_files(repo_path: &Path, since_sha: &str) -> Result<Vec<FileChange>> {
+    let out = Command::new("git")
+        .current_dir(repo_path)
+        .args(["diff", "--name-status", "-M", since_sha, "HEAD"])
+        .output()
+        .context("Failed to run git diff")?;
+
+    if !out.status.success() {
+        anyhow::bail!("git diff failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    let mut changes = Vec::new();
+
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        match parts.as_slice() {
+            [status, path] if status.starts_with('D') => {
+                changes.push(FileChange::Deleted(path.to_string()));
+            }
+            [status, path]
+                if status.starts_with('A')
+                    || status.starts_with('M')
+                    || status.starts_with('C') =>
+            {
+                changes.push(FileChange::AddedOrModified(path.to_string()));
+            }
+            [status, from, to] if status.starts_with('R') => {
+                changes.push(FileChange::Renamed {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(changes)
 }
 
 pub fn write_chunks_to_branch(
@@ -23,22 +83,86 @@ pub fn write_chunks_to_branch(
     setup_worktree(repo_path, &worktree_path)?;
 
     for (relative_path, chunks) in file_chunks {
-        let dest = worktree_path.join(relative_path);
-
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create dirs for {}", relative_path))?;
-        }
-
-        let json = serde_json::to_string(chunks)
-            .with_context(|| format!("Failed to serialize chunks for {}", relative_path))?;
-
-        std::fs::write(&dest, json)
-            .with_context(|| format!("Failed to write {}", relative_path))?;
+        write_chunk_file(&worktree_path, relative_path, chunks)?;
     }
 
+    write_indexed_at(repo_path, &worktree_path)?;
     commit_worktree(repo_path, &worktree_path)?;
     remove_worktree(repo_path, &worktree_path)?;
+
+    Ok(())
+}
+
+pub fn apply_incremental_changes(
+    repo_path: &Path,
+    changes: &[FileChange],
+    file_chunks: &[(String, Vec<StoredChunk>)],
+) -> Result<()> {
+    let worktree_path = repo_path.join(".git").join("semantic-worktree");
+
+    setup_worktree(repo_path, &worktree_path)?;
+
+    for change in changes {
+        match change {
+            FileChange::Deleted(path) => {
+                let dest = worktree_path.join(path);
+                if dest.exists() {
+                    std::fs::remove_file(&dest)
+                        .with_context(|| format!("Failed to remove {}", path))?;
+                }
+            }
+            FileChange::Renamed { from, to: _ } => {
+                let old_dest = worktree_path.join(from);
+                if old_dest.exists() {
+                    std::fs::remove_file(&old_dest)
+                        .with_context(|| format!("Failed to remove renamed file {}", from))?;
+                }
+            }
+            FileChange::AddedOrModified(_) => {}
+        }
+    }
+
+    for (relative_path, chunks) in file_chunks {
+        write_chunk_file(&worktree_path, relative_path, chunks)?;
+    }
+
+    write_indexed_at(repo_path, &worktree_path)?;
+    commit_worktree(repo_path, &worktree_path)?;
+    remove_worktree(repo_path, &worktree_path)?;
+
+    Ok(())
+}
+
+fn write_chunk_file(
+    worktree_path: &Path,
+    relative_path: &str,
+    chunks: &[StoredChunk],
+) -> Result<()> {
+    let dest = worktree_path.join(relative_path);
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create dirs for {}", relative_path))?;
+    }
+
+    let json = serde_json::to_string(chunks)
+        .with_context(|| format!("Failed to serialize chunks for {}", relative_path))?;
+
+    std::fs::write(&dest, json).with_context(|| format!("Failed to write {}", relative_path))?;
+
+    Ok(())
+}
+
+fn write_indexed_at(repo_path: &Path, worktree_path: &Path) -> Result<()> {
+    let head_sha = Command::new("git")
+        .current_dir(repo_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    std::fs::write(worktree_path.join(INDEXED_AT_FILE), &head_sha)
+        .context("Failed to write .indexed-at")?;
 
     Ok(())
 }
@@ -92,7 +216,7 @@ fn collect_chunks_from_dir(
         let path = entry.path();
 
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name == ".git" {
+        if name == ".git" || name == INDEXED_AT_FILE {
             continue;
         }
 

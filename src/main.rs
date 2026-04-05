@@ -9,6 +9,12 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+type EmbedResult = (
+    Vec<(String, Vec<semantic_branch::StoredChunk>)>,
+    usize,
+    usize,
+);
+
 #[derive(Parser)]
 #[command(name = "gitsem")]
 #[command(version, about = "Semantic search for your codebase")]
@@ -103,21 +109,16 @@ fn collect_files(repo_path: &PathBuf) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn index_codebase() -> Result<()> {
-    let repo_path = PathBuf::from(".");
-
-    let files = collect_files(&repo_path)?;
-    println!("Found {} tracked files", files.len());
-
-    let config = embed::EmbeddingConfig::load_or_default().unwrap_or_default();
-    let mut provider = embed::create_provider(&config)?;
-    provider.init()?;
-
-    let mut file_chunks: Vec<(String, Vec<semantic_branch::StoredChunk>)> = Vec::new();
+fn embed_files(
+    file_paths: &[PathBuf],
+    repo_path: &PathBuf,
+    provider: &mut dyn embed::EmbeddingProvider,
+) -> Result<EmbedResult> {
+    let mut file_chunks = Vec::new();
     let mut total_chunks = 0;
     let mut skipped = 0;
 
-    for file_path in &files {
+    for file_path in file_paths {
         let content = match std::fs::read_to_string(file_path) {
             Ok(c) => c,
             Err(_) => {
@@ -127,7 +128,7 @@ fn index_codebase() -> Result<()> {
         };
 
         let relative = file_path
-            .strip_prefix(&repo_path)
+            .strip_prefix(repo_path)
             .unwrap_or(file_path)
             .to_string_lossy()
             .to_string();
@@ -153,18 +154,88 @@ fn index_codebase() -> Result<()> {
         file_chunks.push((relative, stored));
     }
 
-    println!(
-        "Generated {} chunks from {} files ({} skipped)",
-        total_chunks,
-        files.len() - skipped,
-        skipped
-    );
+    Ok((file_chunks, total_chunks, skipped))
+}
 
-    println!("Writing to semantic branch...");
-    semantic_branch::write_chunks_to_branch(&repo_path, &file_chunks)
-        .context("Failed to write to semantic branch")?;
+fn index_codebase() -> Result<()> {
+    let repo_path = PathBuf::from(".");
 
-    println!("Done. Run `gitsem hydrate` to populate the local search index.");
+    let config = embed::EmbeddingConfig::load_or_default().unwrap_or_default();
+    let mut provider = embed::create_provider(&config)?;
+    provider.init()?;
+
+    match semantic_branch::read_last_indexed_sha(&repo_path) {
+        Some(last_sha) => {
+            println!("Last indexed SHA: {}", &last_sha[..8.min(last_sha.len())]);
+
+            let changes = semantic_branch::get_changed_files(&repo_path, &last_sha)
+                .context("Failed to compute changed files")?;
+
+            if changes.is_empty() {
+                println!("Nothing changed since last index.");
+                return Ok(());
+            }
+
+            let to_embed: Vec<PathBuf> = changes
+                .iter()
+                .filter_map(|c| match c {
+                    semantic_branch::FileChange::AddedOrModified(p) => Some(repo_path.join(p)),
+                    semantic_branch::FileChange::Renamed { to, .. } => Some(repo_path.join(to)),
+                    semantic_branch::FileChange::Deleted(_) => None,
+                })
+                .collect();
+
+            let deleted = changes
+                .iter()
+                .filter(|c| matches!(c, semantic_branch::FileChange::Deleted(_)))
+                .count();
+            let renamed = changes
+                .iter()
+                .filter(|c| matches!(c, semantic_branch::FileChange::Renamed { .. }))
+                .count();
+
+            println!(
+                "Changes: {} added/modified, {} deleted, {} renamed",
+                to_embed.len(),
+                deleted,
+                renamed,
+            );
+
+            let (file_chunks, total_chunks, skipped) =
+                embed_files(&to_embed, &repo_path, provider.as_mut())?;
+
+            println!(
+                "Generated {} chunks from {} files ({} skipped)",
+                total_chunks,
+                to_embed.len() - skipped,
+                skipped
+            );
+
+            println!("Updating semantic branch...");
+            semantic_branch::apply_incremental_changes(&repo_path, &changes, &file_chunks)
+                .context("Failed to update semantic branch")?;
+        }
+        None => {
+            let files = collect_files(&repo_path)?;
+            println!("Full index: {} tracked files", files.len());
+
+            let (file_chunks, total_chunks, skipped) =
+                embed_files(&files, &repo_path, provider.as_mut())?;
+
+            println!(
+                "Generated {} chunks from {} files ({} skipped)",
+                total_chunks,
+                files.len() - skipped,
+                skipped
+            );
+
+            println!("Writing to semantic branch...");
+            semantic_branch::write_chunks_to_branch(&repo_path, &file_chunks)
+                .context("Failed to write to semantic branch")?;
+        }
+    }
+
+    println!("Done. Run `git-semantic hydrate` to populate the local search index.");
     println!("Run `git push origin semantic` to share with the team.");
 
     Ok(())

@@ -12,7 +12,7 @@ src/db.rs            →        src/db.rs         ← [{...}, ...]
 src/chunking/mod.rs  →        src/chunking/mod.rs
 ```
 
-1. `git-semantic index` parses all tracked files with tree-sitter, embeds each chunk, and commits the mirrored JSON files to the `semantic` orphan branch
+1. `git-semantic index` parses all tracked files with tree-sitter, embeds each chunk, and commits the mirrored JSON files to the `semantic` orphan branch. On subsequent runs it only re-embeds files that changed since the last index (incremental)
 2. `git push origin semantic` shares the embeddings with the team
 3. Contributors run `git fetch origin semantic` + `git-semantic hydrate` to populate their local SQLite search index — no re-embedding needed
 4. `git-semantic grep` runs KNN vector similarity search against the local index
@@ -88,7 +88,7 @@ The CI pipeline runs `git-semantic index` automatically on every push to the mai
 | Embedding freshness | Manual, on demand | Automatic on every merge |
 | API key exposure | Developer's machine only | CI secret |
 | Setup complexity | None | CI workflow + secret |
-| Cost control | Full | Per-push (use incremental indexing) |
+| Cost control | Full | Per-push, minimal (incremental by default) |
 
 ## Installation
 
@@ -173,12 +173,14 @@ git-semantic grep "..."
 
 ### `git-semantic index`
 
-Parses and embeds all files tracked by git, then commits the result to the `semantic` orphan branch.
+Parses and embeds files, then commits the result to the `semantic` orphan branch.
 
 ```bash
 git-semantic index
 ```
 
+- **First run:** full index of all tracked files, writes `.indexed-at` with the current HEAD SHA
+- **Subsequent runs:** incremental — diffs against the last indexed SHA, re-embeds only added, modified, renamed, or deleted files
 - Respects `.gitignore` (uses `git ls-files`)
 - Skips binary files
 - Files with unrecognized extensions are stored as a single chunk
