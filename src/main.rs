@@ -109,6 +109,10 @@ fn index_codebase() -> Result<()> {
     let files = collect_files(&repo_path)?;
     println!("Found {} tracked files", files.len());
 
+    let config = embed::EmbeddingConfig::load_or_default().unwrap_or_default();
+    let mut provider = embed::create_provider(&config)?;
+    provider.init()?;
+
     let mut file_chunks: Vec<(String, Vec<semantic_branch::StoredChunk>)> = Vec::new();
     let mut total_chunks = 0;
     let mut skipped = 0;
@@ -132,7 +136,8 @@ fn index_codebase() -> Result<()> {
         let mut stored: Vec<semantic_branch::StoredChunk> = Vec::new();
 
         for code_chunk in code_chunks {
-            let embedding = embed::generate_embedding(&code_chunk.text)
+            let embedding = provider
+                .generate_embedding(&code_chunk.text)
                 .context("Failed to generate embedding")?;
 
             stored.push(semantic_branch::StoredChunk {

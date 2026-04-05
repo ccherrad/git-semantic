@@ -40,8 +40,6 @@ pub fn parse_with_tree_sitter(text: &str, language: SupportedLanguage) -> Result
             text: text.to_string(),
             start_line: 0,
             end_line: text.lines().count(),
-            start_byte: 0,
-            end_byte: text.len(),
         });
     }
 
@@ -52,18 +50,16 @@ fn walk_tree(text: &str, node: tree_sitter::Node, chunks: &mut Vec<CodeChunk>) {
     let node_kind = node.kind();
 
     if CHUNK_NODE_TYPES.contains(&node_kind) || is_top_level_definition(&node) {
-        let start_byte = node.start_byte();
-        let end_byte = node.end_byte();
         let start_line = node.start_position().row;
         let end_line = node.end_position().row;
+        let start_byte = node.start_byte();
+        let end_byte = node.end_byte();
 
         if let Some(chunk_text) = text.get(start_byte..end_byte) {
             chunks.push(CodeChunk {
                 text: chunk_text.to_string(),
                 start_line,
                 end_line,
-                start_byte,
-                end_byte,
             });
             return;
         }

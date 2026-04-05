@@ -42,9 +42,5 @@ tree-sitter-go = "0.23"
 regex = "1.10"
 
 [[bin]]
-name = "gitsem"
-path = "src/main.rs"
-
-[[bin]]
 name = "git-semantic"
 path = "src/main.rs"

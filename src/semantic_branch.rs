@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 const SEMANTIC_BRANCH: &str = "semantic";
@@ -48,7 +48,11 @@ pub fn read_chunks_from_branch(repo_path: &Path) -> Result<Vec<(String, Vec<Stor
 
     let fetch_result = Command::new("git")
         .current_dir(repo_path)
-        .args(["fetch", "origin", &format!("{}:{}", SEMANTIC_BRANCH, SEMANTIC_BRANCH)])
+        .args([
+            "fetch",
+            "origin",
+            &format!("{}:{}", SEMANTIC_BRANCH, SEMANTIC_BRANCH),
+        ])
         .output();
 
     if let Ok(out) = fetch_result {
@@ -87,11 +91,12 @@ fn collect_chunks_from_dir(
         let entry = entry?;
         let path = entry.path();
 
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name == ".git" {
+            continue;
+        }
+
         if path.is_dir() {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name == ".git" {
-                continue;
-            }
             collect_chunks_from_dir(base, &path, result)?;
         } else {
             let relative = path
@@ -122,11 +127,49 @@ fn ensure_semantic_branch(repo_path: &Path) -> Result<()> {
         .unwrap_or(false);
 
     if !exists {
+        let empty_tree = Command::new("git")
+            .current_dir(repo_path)
+            .args(["hash-object", "-t", "tree", "--stdin"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .context("Failed to create empty tree")?;
+
+        if !empty_tree.status.success() {
+            anyhow::bail!(
+                "Failed to create empty tree: {}",
+                String::from_utf8_lossy(&empty_tree.stderr)
+            );
+        }
+
+        let tree_sha = String::from_utf8_lossy(&empty_tree.stdout)
+            .trim()
+            .to_string();
+
+        let commit = Command::new("git")
+            .current_dir(repo_path)
+            .args([
+                "commit-tree",
+                &tree_sha,
+                "-m",
+                "init: create semantic branch",
+            ])
+            .output()
+            .context("Failed to create initial commit")?;
+
+        if !commit.status.success() {
+            anyhow::bail!(
+                "Failed to create initial commit: {}",
+                String::from_utf8_lossy(&commit.stderr)
+            );
+        }
+
+        let commit_sha = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+
         let out = Command::new("git")
             .current_dir(repo_path)
-            .args(["checkout", "--orphan", SEMANTIC_BRANCH])
+            .args(["branch", SEMANTIC_BRANCH, &commit_sha])
             .output()
-            .context("Failed to create orphan branch")?;
+            .context("Failed to create semantic branch")?;
 
         if !out.status.success() {
             anyhow::bail!(
@@ -134,28 +177,21 @@ fn ensure_semantic_branch(repo_path: &Path) -> Result<()> {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
-
-        Command::new("git")
-            .current_dir(repo_path)
-            .args(["rm", "-rf", "--cached", "."])
-            .output()
-            .ok();
-
-        Command::new("git")
-            .current_dir(repo_path)
-            .args(["checkout", "-"])
-            .output()
-            .context("Failed to return to original branch")?;
     }
 
     Ok(())
 }
 
-fn setup_worktree(repo_path: &Path, worktree_path: &PathBuf) -> Result<()> {
+fn setup_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     if worktree_path.exists() {
         Command::new("git")
             .current_dir(repo_path)
-            .args(["worktree", "remove", "--force", worktree_path.to_str().unwrap()])
+            .args([
+                "worktree",
+                "remove",
+                "--force",
+                worktree_path.to_str().unwrap(),
+            ])
             .output()
             .ok();
     }
@@ -193,7 +229,7 @@ fn setup_worktree(repo_path: &Path, worktree_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn commit_worktree(repo_path: &Path, worktree_path: &PathBuf) -> Result<()> {
+fn commit_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     Command::new("git")
         .current_dir(worktree_path)
         .args(["add", "-A"])
@@ -236,10 +272,15 @@ fn commit_worktree(repo_path: &Path, worktree_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn remove_worktree(repo_path: &Path, worktree_path: &PathBuf) -> Result<()> {
+fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     Command::new("git")
         .current_dir(repo_path)
-        .args(["worktree", "remove", "--force", worktree_path.to_str().unwrap()])
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            worktree_path.to_str().unwrap(),
+        ])
         .output()
         .context("Failed to remove worktree")?;
 

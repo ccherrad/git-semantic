@@ -30,7 +30,7 @@ mod tests {
     #[test]
     fn test_generate_embedding_with_onnx() {
         let mut config = EmbeddingConfig::default();
-        config.provider = EmbeddingProviderType::ONNX;
+        config.provider = EmbeddingProviderType::Onnx;
 
         let result = generate_embedding_with_config("test", Some(config));
         assert!(result.is_ok());

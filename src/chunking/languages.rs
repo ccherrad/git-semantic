@@ -28,7 +28,7 @@ impl SupportedLanguage {
 }
 
 pub fn detect_language(file_path: &str) -> Option<SupportedLanguage> {
-    let extension = file_path.split('.').last()?.to_lowercase();
+    let extension = file_path.split('.').next_back()?.to_lowercase();
 
     match extension.as_str() {
         "rs" => Some(SupportedLanguage::Rust),

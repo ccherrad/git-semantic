@@ -17,9 +17,9 @@ impl Database {
         use crate::embed::EmbeddingConfig;
 
         let config = EmbeddingConfig::load_or_default()?;
-        let dim = embedding_dim.unwrap_or_else(|| match config.provider {
+        let dim = embedding_dim.unwrap_or(match config.provider {
             crate::embed::EmbeddingProviderType::OpenAI => 1536,
-            crate::embed::EmbeddingProviderType::ONNX => config.onnx.embedding_dim,
+            crate::embed::EmbeddingProviderType::Onnx => config.onnx.embedding_dim,
         });
 
         unsafe {
@@ -83,7 +83,9 @@ impl Database {
 
     pub fn clear(&self) -> Result<()> {
         self.conn
-            .execute_batch("DELETE FROM vec_metadata; DELETE FROM vec_chunks; DELETE FROM code_chunks;")
+            .execute_batch(
+                "DELETE FROM vec_metadata; DELETE FROM vec_chunks; DELETE FROM code_chunks;",
+            )
             .context("Failed to clear database")
     }
 
@@ -93,17 +95,19 @@ impl Database {
         let embedding_blob =
             bincode::serialize(&chunk.embedding).context("Failed to serialize embedding")?;
 
-        self.conn.execute(
-            "INSERT INTO code_chunks (file_path, start_line, end_line, content, embedding)
+        self.conn
+            .execute(
+                "INSERT INTO code_chunks (file_path, start_line, end_line, content, embedding)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                &chunk.file_path,
-                chunk.start_line,
-                chunk.end_line,
-                &chunk.content,
-                &embedding_blob
-            ],
-        ).context("Failed to insert chunk into database")?;
+                params![
+                    &chunk.file_path,
+                    chunk.start_line,
+                    chunk.end_line,
+                    &chunk.content,
+                    &embedding_blob
+                ],
+            )
+            .context("Failed to insert chunk into database")?;
 
         let chunk_id = self.conn.last_insert_rowid();
 
@@ -114,17 +118,19 @@ impl Database {
             )
             .context("Failed to insert into vec_chunks")?;
 
-        self.conn.execute(
-            "INSERT INTO vec_metadata (chunk_id, file_path, start_line, end_line, content)
+        self.conn
+            .execute(
+                "INSERT INTO vec_metadata (chunk_id, file_path, start_line, end_line, content)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                chunk_id,
-                &chunk.file_path,
-                chunk.start_line,
-                chunk.end_line,
-                &chunk.content,
-            ],
-        ).context("Failed to insert metadata")?;
+                params![
+                    chunk_id,
+                    &chunk.file_path,
+                    chunk.start_line,
+                    chunk.end_line,
+                    &chunk.content,
+                ],
+            )
+            .context("Failed to insert metadata")?;
 
         Ok(())
     }

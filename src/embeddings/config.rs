@@ -6,7 +6,7 @@ use std::process::Command;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EmbeddingProviderType {
     OpenAI,
-    ONNX,
+    Onnx,
 }
 
 impl std::str::FromStr for EmbeddingProviderType {
@@ -15,7 +15,7 @@ impl std::str::FromStr for EmbeddingProviderType {
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(EmbeddingProviderType::OpenAI),
-            "onnx" | "local" => Ok(EmbeddingProviderType::ONNX),
+            "onnx" | "local" => Ok(EmbeddingProviderType::Onnx),
             _ => Err(anyhow::anyhow!(
                 "Unknown provider: {}. Valid options: openai, onnx",
                 s
@@ -28,7 +28,7 @@ impl std::fmt::Display for EmbeddingProviderType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EmbeddingProviderType::OpenAI => write!(f, "openai"),
-            EmbeddingProviderType::ONNX => write!(f, "onnx"),
+            EmbeddingProviderType::Onnx => write!(f, "onnx"),
         }
     }
 }
@@ -59,7 +59,7 @@ pub struct ONNXConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            provider: EmbeddingProviderType::ONNX,
+            provider: EmbeddingProviderType::Onnx,
             openai: OpenAIConfig::default(),
             onnx: ONNXConfig::default(),
         }
@@ -145,6 +145,7 @@ impl EmbeddingConfig {
         })
     }
 
+    #[allow(dead_code)]
     pub fn save(&self) -> Result<()> {
         Self::set_git_config("gitsem.provider", &self.provider.to_string())?;
         self.openai.save()?;
@@ -194,6 +195,7 @@ impl OpenAIConfig {
         }
     }
 
+    #[allow(dead_code)]
     fn save(&self) -> Result<()> {
         EmbeddingConfig::set_git_config("gitsem.openai.model", &self.model)?;
         EmbeddingConfig::set_git_config("gitsem.openai.maxTokens", &self.max_tokens.to_string())?;
@@ -218,6 +220,7 @@ impl ONNXConfig {
         }
     }
 
+    #[allow(dead_code)]
     fn save(&self) -> Result<()> {
         EmbeddingConfig::set_git_config("gitsem.onnx.modelName", &self.model_name)?;
         EmbeddingConfig::set_git_config(

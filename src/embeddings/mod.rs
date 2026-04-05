@@ -4,6 +4,7 @@ pub mod openai;
 
 use anyhow::Result;
 
+#[allow(dead_code)]
 pub trait EmbeddingProvider: Send + Sync {
     fn generate_embedding(&mut self, text: &str) -> Result<Vec<f32>>;
 
@@ -21,7 +22,7 @@ pub fn create_provider(config: &config::EmbeddingConfig) -> Result<Box<dyn Embed
         config::EmbeddingProviderType::OpenAI => {
             Ok(Box::new(openai::OpenAIProvider::new(config.clone())?))
         }
-        config::EmbeddingProviderType::ONNX => {
+        config::EmbeddingProviderType::Onnx => {
             Ok(Box::new(onnx::ONNXProvider::new(config.clone())?))
         }
     }
