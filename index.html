@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>git-semantic</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      background: #0d0d0d;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 80px 24px;
+    }
+
+    .container { max-width: 680px; width: 100%; }
+
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: -0.5px;
+      margin-bottom: 16px;
+    }
+
+    .tagline {
+      font-size: 1.1rem;
+      color: #888;
+      line-height: 1.6;
+      margin-bottom: 48px;
+    }
+
+    .tagline span { color: #c8f060; }
+
+    pre {
+      background: #161616;
+      border: 1px solid #222;
+      border-radius: 8px;
+      padding: 20px 24px;
+      font-size: 0.88rem;
+      line-height: 1.7;
+      overflow-x: auto;
+      margin-bottom: 48px;
+      color: #ccc;
+    }
+
+    .comment { color: #555; }
+    .cmd { color: #c8f060; }
+
+    h2 {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: #555;
+      margin-bottom: 20px;
+    }
+
+    .how {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      margin-bottom: 48px;
+    }
+
+    .step {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    .step-num {
+      font-size: 0.75rem;
+      color: #c8f060;
+      font-weight: 700;
+      padding-top: 2px;
+      min-width: 20px;
+    }
+
+    .step-text {
+      font-size: 0.95rem;
+      color: #999;
+      line-height: 1.6;
+    }
+
+    .step-text strong { color: #e0e0e0; }
+
+    .links {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    a {
+      font-size: 0.9rem;
+      color: #c8f060;
+      text-decoration: none;
+      border-bottom: 1px solid #3a4a1a;
+      padding-bottom: 2px;
+      transition: border-color 0.2s;
+    }
+
+    a:hover { border-color: #c8f060; }
+
+    footer {
+      margin-top: 80px;
+      font-size: 0.8rem;
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>git-semantic</h1>
+    <p class="tagline">
+      Semantic search for your codebase.<br/>
+      Ask in plain English, get back <span>the exact function</span> — not a file to skim, not 80 grep matches.
+    </p>
+
+    <pre><span class="comment"># install</span>
+<span class="cmd">cargo install gitsem</span>
+
+<span class="comment"># index your codebase</span>
+<span class="cmd">git-semantic index</span>
+
+<span class="comment"># search</span>
+<span class="cmd">git-semantic grep "how incoming requests are validated"</span>
+
+<span class="comment"># share with your team (no re-indexing needed)</span>
+<span class="cmd">git push origin semantic</span></pre>
+
+    <h2>How it works</h2>
+    <div class="how">
+      <div class="step">
+        <span class="step-num">01</span>
+        <span class="step-text"><strong>Parses</strong> every tracked file with tree-sitter, splitting on function and class boundaries.</span>
+      </div>
+      <div class="step">
+        <span class="step-num">02</span>
+        <span class="step-text"><strong>Embeds</strong> each chunk using OpenAI or a local ONNX model — no code leaves your machine if you prefer.</span>
+      </div>
+      <div class="step">
+        <span class="step-num">03</span>
+        <span class="step-text"><strong>Stores</strong> vectors in a local SQLite index and on a Git orphan branch so the whole team shares embeddings without re-indexing.</span>
+      </div>
+      <div class="step">
+        <span class="step-num">04</span>
+        <span class="step-text"><strong>Searches</strong> with KNN similarity. Results include the full matched chunk — ready to use, no file reading needed.</span>
+      </div>
+    </div>
+
+    <h2>Links</h2>
+    <div class="links">
+      <a href="https://github.com/ccherrad/git-semantic">GitHub</a>
+      <a href="https://crates.io/crates/gitsem">crates.io</a>
+    </div>
+
+    <footer>MIT OR Apache-2.0</footer>
+  </div>
+</body>
+</html>
