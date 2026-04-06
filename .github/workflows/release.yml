@@ -43,14 +43,14 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../gitsem-${{ matrix.target }}.tar.gz gitsem git-semantic
+          tar czf ../../../gitsem-${{ matrix.target }}.tar.gz git-semantic
           cd -
 
       - name: Package (Windows)
         if: matrix.archive == 'zip'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../gitsem-${{ matrix.target }}.zip gitsem.exe git-semantic.exe
+          7z a ../../../gitsem-${{ matrix.target }}.zip git-semantic.exe
           cd -
 
       - name: Upload artifact
