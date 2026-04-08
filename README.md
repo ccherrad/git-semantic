@@ -21,8 +21,6 @@ src/chunking/mod.rs  →        src/chunking/mod.rs
 
 Indexing only needs to happen once — whoever runs it pushes the `semantic` branch and the whole team benefits. Nobody else needs an API key or has to re-embed anything.
 
-You can run indexing manually from any machine, or automate it in your CI/CD pipeline so embeddings stay fresh after every merge.
-
 ### Manual
 
 ```bash
@@ -37,8 +35,6 @@ git-semantic grep "..."
 ```
 
 ### Automated (GitHub Actions)
-
-Add `.github/workflows/semantic-index.yml` to your repository and indexing happens automatically on every merge to main:
 
 ```yaml
 name: Semantic Index
@@ -57,7 +53,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install git-semantic
-        run: cargo install git-semantic
+        run: cargo install gitsem
 
       - name: Index codebase
         env:
@@ -73,24 +69,11 @@ jobs:
 
 ## Installation
 
-### Prerequisites
-
-- Rust 1.65 or higher
-- Git 2.0 or higher
-
-### From crates.io
-
 ```bash
-cargo install git-semantic
+cargo install gitsem
 ```
 
-### Build from Source
-
-```bash
-git clone https://github.com/ccherrad/git-semantic.git
-cd git-semantic
-cargo install --path .
-```
+**Prerequisites:** Rust 1.65+, Git 2.0+
 
 ## Commands
 
@@ -98,58 +81,70 @@ cargo install --path .
 
 Parses and embeds files, then commits the result to the `semantic` orphan branch.
 
-```bash
-git-semantic index
-```
-
-- **First run:** full index of all tracked files, writes `.indexed-at` with the current HEAD SHA
-- **Subsequent runs:** incremental — diffs against the last indexed SHA, re-embeds only added, modified, renamed, or deleted files
+- **First run:** full index of all tracked files
+- **Subsequent runs:** incremental — re-embeds only added, modified, renamed, or deleted files
 - Respects `.gitignore` (uses `git ls-files`)
 - Skips binary files
-- Files with unrecognized extensions are stored as a single chunk
 - Creates the `semantic` branch automatically on first run
 
 ### `git-semantic hydrate`
 
-Reads the `semantic` branch and populates the local `.git/semantic.db` search index.
-
-```bash
-git-semantic hydrate
-```
-
-Attempts to fetch `origin/semantic` first, then falls back to the local branch.
+Reads the `semantic` branch and populates the local `.git/semantic.db` search index. Attempts to fetch `origin/semantic` first, then falls back to the local branch.
 
 ### `git-semantic grep <query>`
 
-Search code semantically using natural language.
+Search code semantically using natural language. Results include the full matched chunk — no file reading needed.
 
 ```bash
-git-semantic grep "authentication logic"
-git-semantic grep "error handling" -n 5
+git-semantic grep "how incoming requests are validated"
+git-semantic grep "error propagation across async boundaries" -n 5
 ```
 
-### `git-semantic agentic-setup`
+### `git-semantic enable claude`
 
-Injects code search instructions into `CLAUDE.md` so coding agents automatically use `git-semantic grep` instead of `git grep`.
+Sets up the project for use with Claude Code — injects `CLAUDE.md` instructions, installs hooks that block grep/rg/whole-file reads, and adds token usage monitoring.
 
 ```bash
-git-semantic agentic-setup
+git-semantic enable claude
 ```
 
-- Appends instructions to an existing `CLAUDE.md`, or creates one if it doesn't exist
+- Writes hook scripts to `.claude/hooks/`
+- Wires hooks into `.claude/settings.json`
+- Injects search instructions into `CLAUDE.md`
 - Idempotent — safe to run multiple times
-- Works with Claude Code, Cursor, GitHub Copilot (via `.cursor/rules` or `.github/copilot-instructions.md` equivalents)
+
+### `git-semantic usage`
+
+Shows token usage for the current project's Claude Code sessions.
+
+```bash
+git-semantic usage
+git-semantic usage -s 10
+```
+
+```
+Project: /Users/you/your-project
+
+SESSION        TURNS    BASELINE     LATEST       WASTE      TOTAL
+-----------------------------------------------------------------
+3b218a3a       42       19k          24k          1.3x       891k
+```
+
+- **BASELINE** — avg tokens/turn for the first 5 turns
+- **LATEST** — avg tokens/turn for the last 3 turns
+- **WASTE** — LATEST / BASELINE (1x = healthy, 5x+ = degrading, 10x+ = start fresh)
+- **TOTAL** — total tokens consumed in the session
 
 ### `git-semantic config`
 
-Configure the embedding provider.
+Configure the embedding provider. Config is stored in `.git/config` and is per-repository.
 
 ```bash
 git-semantic config --list
-git-semantic config gitsem.provider openai
-git-semantic config gitsem.provider onnx
-git-semantic config --get gitsem.provider
-git-semantic config --unset gitsem.onnx.modelPath
+git-semantic config provider openai
+git-semantic config provider onnx
+git-semantic config --get provider
+git-semantic config --unset onnx.modelPath
 ```
 
 ## Configuration
@@ -158,15 +153,24 @@ git-semantic config --unset gitsem.onnx.modelPath
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-git-semantic config gitsem.provider openai
+git-semantic config provider openai
 ```
 
 ### Local ONNX embeddings
 
 ```bash
-git-semantic config gitsem.provider onnx
-git-semantic config gitsem.onnx.modelPath /path/to/model.onnx
+git-semantic config provider onnx
+git-semantic config onnx.modelPath /path/to/model.onnx
 ```
+
+### Available keys
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `provider` | `onnx` | Embedding provider: `openai` or `onnx` |
+| `openai.model` | `text-embedding-3-small` | OpenAI model to use |
+| `onnx.modelPath` | — | Path to local ONNX model file |
+| `onnx.modelName` | `bge-small-en-v1.5` | ONNX model name |
 
 ## Supported Languages
 
@@ -186,13 +190,6 @@ git-semantic/
 │   └── chunking/            # tree-sitter parsing and language detection
 ├── Cargo.toml
 └── README.md
-```
-
-## Building
-
-```bash
-cargo build --release
-cargo test
 ```
 
 ## License
