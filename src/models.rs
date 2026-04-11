@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DirectoryCentroid {
+    pub dir_path: String,
+    pub centroid: Vec<f32>,
+    pub chunk_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CodeChunk {
     pub file_path: String,
     pub start_line: i64,

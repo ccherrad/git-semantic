@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SEMANTIC_BRANCH: &str = "semantic";
 const INDEXED_AT_FILE: &str = ".indexed-at";
 const INDEX_STATE_FILE: &str = ".index-state";
+const DIR_CONTEXT_FILE: &str = ".dir-context";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StoredChunk {
@@ -79,6 +80,7 @@ pub struct IndexSession {
     repo_path: PathBuf,
     worktree_path: PathBuf,
     already_indexed: HashSet<String>,
+    dir_embeddings: HashMap<String, Vec<Vec<f32>>>,
 }
 
 impl IndexSession {
@@ -97,6 +99,7 @@ impl IndexSession {
             repo_path: repo_path.to_path_buf(),
             worktree_path,
             already_indexed,
+            dir_embeddings: HashMap::new(),
         })
     }
 
@@ -108,9 +111,20 @@ impl IndexSession {
         !self.already_indexed.is_empty()
     }
 
-    pub fn write_file(&self, relative_path: &str, chunks: &[StoredChunk]) -> Result<()> {
+    pub fn write_file(&mut self, relative_path: &str, chunks: &[StoredChunk]) -> Result<()> {
         write_chunk_file(&self.worktree_path, relative_path, chunks)?;
         append_index_state(&self.worktree_path, relative_path)?;
+
+        let dir = PathBuf::from(relative_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+
+        let entry = self.dir_embeddings.entry(dir).or_default();
+        for chunk in chunks {
+            entry.push(chunk.embedding.clone());
+        }
+
         Ok(())
     }
 
@@ -124,6 +138,22 @@ impl IndexSession {
     }
 
     pub fn commit(self) -> Result<()> {
+        let mut all_chunks: Vec<(String, Vec<StoredChunk>)> = Vec::new();
+        collect_chunks_from_dir(&self.worktree_path, &self.worktree_path, &mut all_chunks)?;
+
+        let mut dir_embeddings: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+        for (relative_path, chunks) in &all_chunks {
+            let dir = PathBuf::from(relative_path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            let entry = dir_embeddings.entry(dir).or_default();
+            for chunk in chunks {
+                entry.push(chunk.embedding.clone());
+            }
+        }
+
+        write_directory_centroids(&self.worktree_path, &dir_embeddings)?;
         write_indexed_at(&self.repo_path, &self.worktree_path)?;
         clear_index_state(&self.worktree_path)?;
         commit_worktree(&self.repo_path, &self.worktree_path)?;
@@ -209,7 +239,7 @@ fn collect_chunks_from_dir(
         let path = entry.path();
 
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name == ".git" || name == INDEXED_AT_FILE || name == INDEX_STATE_FILE {
+        if name == ".git" || name == INDEXED_AT_FILE || name == INDEX_STATE_FILE || name == DIR_CONTEXT_FILE {
             continue;
         }
 
@@ -334,26 +364,24 @@ fn ensure_semantic_branch(repo_path: &Path) -> Result<()> {
 }
 
 fn setup_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
+    Command::new("git")
+        .current_dir(repo_path)
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            worktree_path.to_str().unwrap(),
+        ])
+        .output()
+        .ok();
     if worktree_path.exists() {
-        Command::new("git")
-            .current_dir(repo_path)
-            .args([
-                "worktree",
-                "remove",
-                "--force",
-                worktree_path.to_str().unwrap(),
-            ])
-            .output()
-            .ok();
-        if worktree_path.exists() {
-            std::fs::remove_dir_all(worktree_path).ok();
-        }
-        Command::new("git")
-            .current_dir(repo_path)
-            .args(["worktree", "prune"])
-            .output()
-            .ok();
+        std::fs::remove_dir_all(worktree_path).ok();
     }
+    Command::new("git")
+        .current_dir(repo_path)
+        .args(["worktree", "prune"])
+        .output()
+        .ok();
 
     let out = Command::new("git")
         .current_dir(repo_path)
@@ -443,4 +471,166 @@ fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
         .context("Failed to remove worktree")?;
 
     Ok(())
+}
+
+fn compute_centroid(embeddings: &[Vec<f32>]) -> Vec<f32> {
+    if embeddings.is_empty() {
+        return vec![];
+    }
+    let dim = embeddings[0].len();
+    let mut centroid = vec![0.0f32; dim];
+    for emb in embeddings {
+        for (i, v) in emb.iter().enumerate() {
+            centroid[i] += v;
+        }
+    }
+    let n = embeddings.len() as f32;
+    centroid.iter_mut().for_each(|v| *v /= n);
+    centroid
+}
+
+fn write_directory_centroids(
+    worktree_path: &Path,
+    dir_embeddings: &HashMap<String, Vec<Vec<f32>>>,
+) -> Result<()> {
+    use crate::models::DirectoryCentroid;
+
+    let propagated = propagate_centroids(dir_embeddings);
+
+    for (dir, embeddings) in &propagated {
+        if embeddings.is_empty() {
+            continue;
+        }
+
+        let centroid = DirectoryCentroid {
+            dir_path: dir.clone(),
+            centroid: compute_centroid(embeddings),
+            chunk_count: embeddings.len(),
+        };
+
+        let json = serde_json::to_string(&centroid)
+            .context("Failed to serialize centroid")?;
+
+        let dir_path = if dir == "." {
+            worktree_path.to_path_buf()
+        } else {
+            worktree_path.join(dir)
+        };
+
+        std::fs::create_dir_all(&dir_path)
+            .with_context(|| format!("Failed to create dir {:?}", dir_path))?;
+
+        std::fs::write(dir_path.join(DIR_CONTEXT_FILE), json)
+            .with_context(|| format!("Failed to write .dir-context for {}", dir))?;
+    }
+
+    Ok(())
+}
+
+fn propagate_centroids(
+    dir_embeddings: &HashMap<String, Vec<Vec<f32>>>,
+) -> HashMap<String, Vec<Vec<f32>>> {
+    let mut propagated: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+
+    for (dir, embeddings) in dir_embeddings {
+        // Add embeddings to every ancestor directory up to root
+        let mut path = PathBuf::from(dir);
+        loop {
+            propagated
+                .entry(path.to_string_lossy().to_string())
+                .or_default()
+                .extend(embeddings.iter().cloned());
+
+            match path.parent() {
+                Some(parent) if parent != path => {
+                    path = parent.to_path_buf();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    propagated
+}
+
+pub fn build_and_write_centroids(repo_path: &Path) -> Result<usize> {
+    let worktree_path = repo_path.join(".git").join("semantic-worktree");
+    setup_worktree(repo_path, &worktree_path)?;
+
+    let mut dir_embeddings: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+    let mut all_chunks: Vec<(String, Vec<StoredChunk>)> = Vec::new();
+    collect_chunks_from_dir(&worktree_path, &worktree_path, &mut all_chunks)?;
+
+    for (relative_path, chunks) in &all_chunks {
+        let dir = PathBuf::from(relative_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let entry = dir_embeddings.entry(dir).or_default();
+        for chunk in chunks {
+            entry.push(chunk.embedding.clone());
+        }
+    }
+
+    let n = dir_embeddings.len();
+    write_directory_centroids(&worktree_path, &dir_embeddings)?;
+
+    Command::new("git")
+        .current_dir(&worktree_path)
+        .args(["add", DIR_CONTEXT_FILE])
+        .output()
+        .context("Failed to stage .dir-context")?;
+
+    let status = Command::new("git")
+        .current_dir(&worktree_path)
+        .args(["diff", "--cached", "--quiet"])
+        .status()
+        .context("Failed to check worktree status")?;
+
+    if !status.success() {
+        Command::new("git")
+            .current_dir(&worktree_path)
+            .args(["commit", "-m", "index: build directory centroids"])
+            .output()
+            .context("Failed to commit .dir-context")?;
+    }
+
+    remove_worktree(repo_path, &worktree_path)?;
+    Ok(n)
+}
+
+pub fn read_centroids_from_branch(repo_path: &Path) -> Result<Vec<crate::models::DirectoryCentroid>> {
+    let worktree_path = repo_path.join(".git").join("semantic-worktree");
+    setup_worktree(repo_path, &worktree_path)?;
+
+    let mut centroids = Vec::new();
+    collect_centroids_from_dir(&worktree_path, &worktree_path, &mut centroids);
+
+    remove_worktree(repo_path, &worktree_path)?;
+    Ok(centroids)
+}
+
+fn collect_centroids_from_dir(
+    base: &Path,
+    dir: &Path,
+    result: &mut Vec<crate::models::DirectoryCentroid>,
+) {
+    let context_file = dir.join(DIR_CONTEXT_FILE);
+    if context_file.exists() {
+        if let Ok(content) = std::fs::read_to_string(&context_file) {
+            if let Ok(centroid) = serde_json::from_str::<crate::models::DirectoryCentroid>(&content) {
+                result.push(centroid);
+            }
+        }
+    }
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if path.is_dir() && name != ".git" {
+                collect_centroids_from_dir(base, &path, result);
+            }
+        }
+    }
 }

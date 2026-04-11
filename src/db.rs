@@ -78,15 +78,68 @@ impl Database {
         )
         .context("Failed to create vec_metadata table")?;
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS dir_centroids (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dir_path TEXT NOT NULL UNIQUE,
+                centroid BLOB NOT NULL,
+                chunk_count INTEGER NOT NULL
+            );",
+        )
+        .context("Failed to create dir_centroids table")?;
+
         Ok(Database { conn })
     }
 
     pub fn clear(&self) -> Result<()> {
         self.conn
             .execute_batch(
-                "DELETE FROM vec_metadata; DELETE FROM vec_chunks; DELETE FROM code_chunks;",
+                "DELETE FROM vec_metadata; DELETE FROM vec_chunks; DELETE FROM code_chunks; DELETE FROM dir_centroids;",
             )
             .context("Failed to clear database")
+    }
+
+    pub fn insert_centroid(&self, centroid: &crate::models::DirectoryCentroid) -> Result<()> {
+        let blob = bincode::serialize(&centroid.centroid)
+            .context("Failed to serialize centroid")?;
+
+        self.conn.execute(
+            "INSERT OR REPLACE INTO dir_centroids (dir_path, centroid, chunk_count)
+             VALUES (?1, ?2, ?3)",
+            params![centroid.dir_path, blob, centroid.chunk_count as i64],
+        )
+        .context("Failed to insert centroid")?;
+
+        Ok(())
+    }
+
+    pub fn find_closest_directory(&self, query_embedding: &[f32]) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT dir_path, centroid FROM dir_centroids",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let dir_path: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((dir_path, blob))
+        })?;
+
+        let mut best_dir: Option<String> = None;
+        let mut best_score = f32::MAX;
+
+        for row in rows {
+            let (dir_path, blob) = row?;
+            let centroid: Vec<f32> = bincode::deserialize(&blob)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+
+            let score = cosine_distance(query_embedding, &centroid);
+            if score < best_score {
+                best_score = score;
+                best_dir = Some(dir_path);
+            }
+        }
+
+        Ok(best_dir)
     }
 
     pub fn insert_chunk(&self, chunk: &CodeChunk) -> Result<()> {
@@ -135,6 +188,49 @@ impl Database {
         Ok(())
     }
 
+    pub fn search_similar_scoped(
+        &self,
+        query_embedding: &[f32],
+        limit: i64,
+        scope: &str,
+    ) -> Result<Vec<CodeChunk>> {
+        use zerocopy::IntoBytes;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT m.file_path, m.start_line, m.end_line, m.content, c.embedding, distance
+             FROM vec_chunks v
+             JOIN vec_metadata m ON v.rowid = m.chunk_id
+             JOIN code_chunks c ON c.id = m.chunk_id
+             WHERE v.embedding MATCH ?1
+               AND k = ?2
+               AND m.file_path LIKE ?3
+             ORDER BY distance",
+        )?;
+
+        let scope_pattern = format!("{}%", scope);
+        let chunks = stmt
+            .query_map(
+                params![query_embedding.as_bytes(), limit, scope_pattern],
+                |row| {
+                    let embedding_blob: Vec<u8> = row.get(4)?;
+                    let embedding: Vec<f32> = bincode::deserialize(&embedding_blob)
+                        .map_err(|_e| rusqlite::Error::InvalidQuery)?;
+
+                    Ok(CodeChunk {
+                        file_path: row.get(0)?,
+                        start_line: row.get(1)?,
+                        end_line: row.get(2)?,
+                        content: row.get(3)?,
+                        embedding,
+                        distance: row.get(5).ok(),
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(chunks)
+    }
+
     pub fn search_similar(&self, query_embedding: &[f32], limit: i64) -> Result<Vec<CodeChunk>> {
         use zerocopy::IntoBytes;
 
@@ -167,6 +263,16 @@ impl Database {
 
         Ok(chunks)
     }
+}
+
+fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 1.0;
+    }
+    1.0 - (dot / (norm_a * norm_b))
 }
 
 #[cfg(test)]

@@ -59,7 +59,7 @@ pub struct ONNXConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            provider: EmbeddingProviderType::Onnx,
+            provider: EmbeddingProviderType::OpenAI,
             openai: OpenAIConfig::default(),
             onnx: ONNXConfig::default(),
         }
@@ -131,10 +131,23 @@ impl EmbeddingConfig {
         Ok(())
     }
 
+    pub fn get_default(key: &str) -> Option<String> {
+        let d = Self::default();
+        match key {
+            "semantic.provider" => Some(d.provider.to_string()),
+            "semantic.openai.model" => Some(d.openai.model),
+            "semantic.openai.maxTokens" => Some(d.openai.max_tokens.to_string()),
+            "semantic.onnx.modelName" => Some(d.onnx.model_name),
+            "semantic.onnx.embeddingDim" => Some(d.onnx.embedding_dim.to_string()),
+            "semantic.onnx.maxLength" => Some(d.onnx.max_length.to_string()),
+            _ => None,
+        }
+    }
+
     pub fn load_or_default() -> Result<Self> {
         let provider_str = Self::get_git_config("semantic.provider")
             .or_else(|| std::env::var("SEMANTIC_PROVIDER").ok())
-            .unwrap_or_else(|| "onnx".to_string());
+            .unwrap_or_else(|| "openai".to_string());
 
         let provider = provider_str.parse()?;
 

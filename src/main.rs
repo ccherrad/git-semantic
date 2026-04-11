@@ -46,7 +46,16 @@ enum Commands {
             help = "Maximum number of results"
         )]
         max_count: i64,
+        #[arg(
+            short = 's',
+            long,
+            help = "Restrict results to the most semantically relevant directory (auto-scoped)"
+        )]
+        scope: bool,
     },
+
+    #[command(about = "Build directory context centroids from existing index")]
+    Context,
 
     #[command(about = "Enable a coding agent for this project (e.g. claude)")]
     Enable {
@@ -89,8 +98,13 @@ fn main() -> Result<()> {
         Commands::Hydrate => {
             hydrate_from_branch()?;
         }
-        Commands::Grep { query, max_count } => {
-            grep_semantic(&query, max_count)?;
+        Commands::Grep { query, max_count, scope } => {
+            grep_semantic(&query, max_count, scope)?;
+        }
+        Commands::Context => {
+            let n = semantic_branch::build_and_write_centroids(&PathBuf::from("."))?;
+            println!("Built centroids for {} directories.", n);
+            println!("Run `git-semantic hydrate` to load them into the local index.");
         }
         Commands::Enable { agent } => match agent.as_str() {
             "claude" => claude_setup()?,
@@ -144,7 +158,7 @@ fn make_progress_bar(total: usize) -> ProgressBar {
 
 fn index_files_streaming(
     files: &[(PathBuf, String)],
-    session: &semantic_branch::IndexSession,
+    session: &mut semantic_branch::IndexSession,
     provider: &mut dyn embed::EmbeddingProvider,
 ) -> Result<IndexStats> {
     let pb = make_progress_bar(files.len());
@@ -217,7 +231,9 @@ fn index_codebase() -> Result<()> {
                 .context("Failed to compute changed files")?;
 
             if changes.is_empty() {
-                println!("Already up to date.");
+                println!("Already up to date. Rebuilding directory context...");
+                let n = semantic_branch::build_and_write_centroids(&repo_path)?;
+                println!("Built centroids for {} directories.", n);
                 return Ok(());
             }
 
@@ -225,10 +241,10 @@ fn index_codebase() -> Result<()> {
                 .iter()
                 .filter_map(|c| match c {
                     semantic_branch::FileChange::AddedOrModified(p) => {
-                        Some((repo_path.join(p), p.clone()))
+                        chunking::is_supported_file(p).then_some((repo_path.join(p), p.clone()))
                     }
                     semantic_branch::FileChange::Renamed { to, .. } => {
-                        Some((repo_path.join(to), to.clone()))
+                        chunking::is_supported_file(to).then_some((repo_path.join(to), to.clone()))
                     }
                     semantic_branch::FileChange::Deleted(_) => None,
                 })
@@ -245,7 +261,7 @@ fn index_codebase() -> Result<()> {
                 n_deleted,
             );
 
-            let session = semantic_branch::IndexSession::open(&repo_path, true)?;
+            let mut session = semantic_branch::IndexSession::open(&repo_path, true)?;
 
             for change in &changes {
                 if let semantic_branch::FileChange::Deleted(p)
@@ -255,7 +271,7 @@ fn index_codebase() -> Result<()> {
                 }
             }
 
-            let stats = index_files_streaming(&to_embed, &session, provider.as_mut())?;
+            let stats = index_files_streaming(&to_embed, &mut session, provider.as_mut())?;
 
             session.commit()?;
 
@@ -265,25 +281,25 @@ fn index_codebase() -> Result<()> {
             let files = collect_files(&repo_path)?;
             let files: Vec<(PathBuf, String)> = files
                 .into_iter()
-                .map(|p| {
+                .filter_map(|p| {
                     let rel = p
                         .strip_prefix(&repo_path)
                         .unwrap_or(&p)
                         .to_string_lossy()
                         .to_string();
-                    (p, rel)
+                    chunking::is_supported_file(&rel).then_some((p, rel))
                 })
                 .collect();
 
             println!("Full index: {} tracked files", files.len());
 
-            let session = semantic_branch::IndexSession::open(&repo_path, false)?;
+            let mut session = semantic_branch::IndexSession::open(&repo_path, false)?;
 
             if session.has_partial_state() {
                 println!("Resuming interrupted index...");
             }
 
-            let stats = index_files_streaming(&files, &session, provider.as_mut())?;
+            let stats = index_files_streaming(&files, &mut session, provider.as_mut())?;
 
             session.commit()?;
 
@@ -346,18 +362,41 @@ fn hydrate_from_branch() -> Result<()> {
 
     println!("Hydrated {} chunks into local index.", total_chunks);
 
+    let centroids = semantic_branch::read_centroids_from_branch(&repo_path)
+        .unwrap_or_default();
+
+    if !centroids.is_empty() {
+        for centroid in &centroids {
+            db.insert_centroid(centroid)
+                .context("Failed to insert centroid")?;
+        }
+        println!("Hydrated {} directory centroids.", centroids.len());
+    }
+
     Ok(())
 }
 
-fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
+fn grep_semantic(query: &str, max_count: i64, scope: bool) -> Result<()> {
     let db = db::Database::init().context("Failed to initialize database")?;
 
     let query_embedding =
         embed::generate_embedding(query).context("Failed to generate query embedding")?;
 
-    let results = db
-        .search_similar(&query_embedding, max_count)
-        .context("Failed to search database")?;
+    let results = if scope {
+        match db.find_closest_directory(&query_embedding)? {
+            Some(dir) => {
+                println!("Scope: {}/", dir);
+                db.search_similar_scoped(&query_embedding, max_count, &dir)
+                    .context("Failed to search database")?
+            }
+            None => db
+                .search_similar(&query_embedding, max_count)
+                .context("Failed to search database")?,
+        }
+    } else {
+        db.search_similar(&query_embedding, max_count)
+            .context("Failed to search database")?
+    };
 
     if results.is_empty() {
         println!("No results found. Run `semantic hydrate` first.");
@@ -780,7 +819,11 @@ fn dirs_home() -> Result<PathBuf> {
 }
 
 fn to_git_key(key: &str) -> String {
-    format!("semantic.{}", key)
+    if key.starts_with("semantic.") {
+        key.to_string()
+    } else {
+        format!("semantic.{}", key)
+    }
 }
 
 fn config_command(
@@ -806,11 +849,10 @@ fn config_command(
 
     if get {
         let key = to_git_key(key.context("Key required for --get")?);
-        if let Some(value) = EmbeddingConfig::get_git_config(&key) {
-            println!("{}", value);
-        } else {
-            anyhow::bail!("Configuration key '{}' not found", key);
-        }
+        let value = EmbeddingConfig::get_git_config(&key)
+            .or_else(|| EmbeddingConfig::get_default(&key))
+            .context(format!("Configuration key '{}' not found", key))?;
+        println!("{}", value);
         return Ok(());
     }
 
@@ -823,11 +865,10 @@ fn config_command(
 
     if let Some(key) = key {
         let key = to_git_key(key);
-        if let Some(value) = EmbeddingConfig::get_git_config(&key) {
-            println!("{}", value);
-        } else {
-            anyhow::bail!("Configuration key '{}' not found", key);
-        }
+        let value = EmbeddingConfig::get_git_config(&key)
+            .or_else(|| EmbeddingConfig::get_default(&key))
+            .context(format!("Configuration key '{}' not found", key))?;
+        println!("{}", value);
         return Ok(());
     }
 
