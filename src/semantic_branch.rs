@@ -7,6 +7,7 @@ use std::process::Command;
 const SEMANTIC_BRANCH: &str = "semantic";
 const INDEXED_AT_FILE: &str = ".indexed-at";
 const INDEX_STATE_FILE: &str = ".index-state";
+const SEMANTIC_MAP_FILE: &str = ".semantic-map.json";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StoredChunk {
@@ -123,7 +124,12 @@ impl IndexSession {
         Ok(())
     }
 
-    pub fn commit(self) -> Result<()> {
+    pub fn worktree_path(&self) -> &Path {
+        &self.worktree_path
+    }
+
+    pub fn commit(self, map: &crate::map::SemanticMap) -> Result<()> {
+        write_semantic_map(&self.worktree_path, map)?;
         write_indexed_at(&self.repo_path, &self.worktree_path)?;
         clear_index_state(&self.worktree_path)?;
         commit_worktree(&self.repo_path, &self.worktree_path)?;
@@ -158,6 +164,38 @@ fn clear_index_state(worktree_path: &Path) -> Result<()> {
         std::fs::remove_file(state_file).context("Failed to remove .index-state")?;
     }
     Ok(())
+}
+
+pub fn read_all_chunks_from_worktree(
+    worktree_path: &Path,
+) -> Result<Vec<(String, Vec<StoredChunk>)>> {
+    let mut result = Vec::new();
+    collect_chunks_from_dir(worktree_path, worktree_path, &mut result)?;
+    Ok(result)
+}
+
+pub fn write_semantic_map(worktree_path: &Path, map: &crate::map::SemanticMap) -> Result<()> {
+    let json = serde_json::to_string(map).context("Failed to serialize semantic map")?;
+    std::fs::write(worktree_path.join(SEMANTIC_MAP_FILE), json)
+        .context("Failed to write .semantic-map.json")?;
+    Ok(())
+}
+
+pub fn read_semantic_map_from_branch(repo_path: &Path) -> Result<crate::map::SemanticMap> {
+    let out = Command::new("git")
+        .current_dir(repo_path)
+        .args([
+            "show",
+            &format!("{}:{}", SEMANTIC_BRANCH, SEMANTIC_MAP_FILE),
+        ])
+        .output()
+        .context("Failed to run git show for semantic map")?;
+
+    if !out.status.success() {
+        anyhow::bail!("Semantic map not found on branch. Run `git-semantic index` first.");
+    }
+
+    serde_json::from_slice(&out.stdout).context("Failed to parse semantic map from branch")
 }
 
 pub fn read_chunks_from_branch(repo_path: &Path) -> Result<Vec<(String, Vec<StoredChunk>)>> {
@@ -209,7 +247,11 @@ fn collect_chunks_from_dir(
         let path = entry.path();
 
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name == ".git" || name == INDEXED_AT_FILE || name == INDEX_STATE_FILE {
+        if name == ".git"
+            || name == INDEXED_AT_FILE
+            || name == INDEX_STATE_FILE
+            || name == SEMANTIC_MAP_FILE
+        {
             continue;
         }
 

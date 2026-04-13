@@ -1,7 +1,9 @@
 mod chunking;
+mod clustering;
 mod db;
 mod embed;
 mod embeddings;
+mod map;
 mod models;
 mod semantic_branch;
 
@@ -58,6 +60,25 @@ enum Commands {
     Usage {
         #[arg(short, long, help = "Number of sessions to show", default_value = "5")]
         sessions: usize,
+        #[arg(
+            short,
+            long,
+            help = "Watch mode: refresh every N seconds",
+            value_name = "SECS"
+        )]
+        watch: Option<u64>,
+    },
+
+    #[command(about = "Show the codebase map or find subsystems matching a query")]
+    Map {
+        #[arg(help = "Natural language query to find matching subsystems (optional)")]
+        query: Option<String>,
+    },
+
+    #[command(about = "Retrieve a specific chunk by file and line range")]
+    Get {
+        #[arg(help = "Chunk location in format file:start-end (e.g. src/db.rs:12-34)")]
+        location: String,
     },
 
     #[command(about = "Get and set semantic options")]
@@ -92,12 +113,28 @@ fn main() -> Result<()> {
         Commands::Grep { query, max_count } => {
             grep_semantic(&query, max_count)?;
         }
+        Commands::Map { query } => {
+            map_command(query.as_deref())?;
+        }
+        Commands::Get { location } => {
+            get_command(&location)?;
+        }
         Commands::Enable { agent } => match agent.as_str() {
             "claude" => claude_setup()?,
             other => anyhow::bail!("Unknown agent '{}'. Supported: claude", other),
         },
-        Commands::Usage { sessions } => {
-            show_usage(sessions)?;
+        Commands::Usage { sessions, watch } => {
+            if let Some(interval) = watch {
+                let secs = if interval == 0 { 2 } else { interval };
+                loop {
+                    print!("\x1B[2J\x1B[H");
+                    show_usage(sessions)?;
+                    println!("\nRefreshing every {}s — Ctrl+C to stop", secs);
+                    std::thread::sleep(std::time::Duration::from_secs(secs));
+                }
+            } else {
+                show_usage(sessions)?;
+            }
         }
         Commands::Config {
             key,
@@ -257,7 +294,25 @@ fn index_codebase() -> Result<()> {
 
             let stats = index_files_streaming(&to_embed, &session, provider.as_mut())?;
 
-            session.commit()?;
+            println!("Building semantic map...");
+            let all_chunks =
+                semantic_branch::read_all_chunks_from_worktree(session.worktree_path())?;
+            let cluster_inputs: Vec<clustering::ClusterInput> = all_chunks
+                .into_iter()
+                .flat_map(|(file, chunks)| {
+                    chunks
+                        .into_iter()
+                        .map(move |chunk| clustering::ClusterInput {
+                            file: file.clone(),
+                            chunk,
+                        })
+                })
+                .collect();
+            let map = clustering::build_map(&cluster_inputs, &mut |text| {
+                provider.generate_embedding(text)
+            })?;
+
+            session.commit(&map)?;
 
             print_summary(&stats, started);
         }
@@ -285,7 +340,25 @@ fn index_codebase() -> Result<()> {
 
             let stats = index_files_streaming(&files, &session, provider.as_mut())?;
 
-            session.commit()?;
+            println!("Building semantic map...");
+            let all_chunks =
+                semantic_branch::read_all_chunks_from_worktree(session.worktree_path())?;
+            let cluster_inputs: Vec<clustering::ClusterInput> = all_chunks
+                .into_iter()
+                .flat_map(|(file, chunks)| {
+                    chunks
+                        .into_iter()
+                        .map(move |chunk| clustering::ClusterInput {
+                            file: file.clone(),
+                            chunk,
+                        })
+                })
+                .collect();
+            let map = clustering::build_map(&cluster_inputs, &mut |text| {
+                provider.generate_embedding(text)
+            })?;
+
+            session.commit(&map)?;
 
             print_summary(&stats, started);
         }
@@ -346,6 +419,26 @@ fn hydrate_from_branch() -> Result<()> {
 
     println!("Hydrated {} chunks into local index.", total_chunks);
 
+    match semantic_branch::read_semantic_map_from_branch(&repo_path) {
+        Ok(map) => {
+            for subsystem in &map.subsystems {
+                db.insert_subsystem(subsystem)
+                    .context("Failed to insert subsystem")?;
+            }
+            for edge in &map.edges {
+                db.insert_edge(edge).context("Failed to insert edge")?;
+            }
+            println!(
+                "Loaded map: {} subsystems, {} edges.",
+                map.subsystems.len(),
+                map.edges.len()
+            );
+        }
+        Err(_) => {
+            println!("No semantic map on branch yet (run `git-semantic index` to build one).");
+        }
+    }
+
     Ok(())
 }
 
@@ -381,30 +474,93 @@ fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
     Ok(())
 }
 
+fn strip_between(text: &str, start_marker: &str, end_marker: &str) -> String {
+    let mut result = String::new();
+    let mut skip = false;
+    for line in text.lines() {
+        if line.contains(start_marker) {
+            skip = true;
+            continue;
+        }
+        if skip && line.contains(end_marker) {
+            skip = false;
+            continue;
+        }
+        if !skip {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
 fn agentic_setup() -> Result<()> {
     const MARKER: &str = "<!-- semantic:agentic-setup -->";
     const INSTRUCTIONS: &str = r#"<!-- semantic:agentic-setup -->
-## Code Search — MANDATORY
+## Code Navigation — MANDATORY
 
 > **This rule applies to all agents and subagents without exception.**
 
-**NEVER use `grep`, `git grep`, `rg`, `ripgrep`, or the Grep tool to search code.**
-**ALWAYS use `git-semantic grep "<natural language query>"` for every code search.**
+**NEVER use `grep`, `git grep`, `rg`, `ripgrep`, the Grep tool, or whole-file reads to explore code.**
+**Use the three-command workflow below for ALL code navigation.**
 
-This is not optional. If you are about to run `grep`, `git grep`, `rg`, or use the Grep tool — stop and use `git-semantic grep` instead.
+---
 
-Queries must describe intent, not syntax:
-- BAD: `git-semantic grep "fn authenticate"` — keyword, not a query
-- GOOD: `git-semantic grep "user authentication and session handling"`
-- BAD: `git-semantic grep "impl Display"`
-- GOOD: `git-semantic grep "how types are formatted for display output"`
+### Critical rules
 
-Use `-n` to control result count (default 10): `git-semantic grep "query" -n 5`
+**1. Retrieve per task, not upfront.**
+NEVER load code before you need it. NEVER bulk-read to "build context". Each task gets only the chunks it needs — retrieve, answer, move on.
 
-Results show `[score] file:start-end` followed by the full code of the matched chunk, then `---`. Do not open the file to read the function — the full code is already in the output. Lower score = more similar.
+**2. The map output IS the answer. Do not re-search what the map already told you.**
+If `map` shows `embed: generate_embedding, create_provider` — you already know `create_provider` is in `embed.rs`. Use `get` immediately. Do NOT run `grep` to find it again.
+
+**3. If the map description contains the function/type name you need — stop. Use `get` on that chunk.**
+Map descriptions are derived from the actual code. A name in the description means the chunk contains it.
+
+**4. Do not use TodoWrite, TaskCreate, or TaskUpdate for sequential task lists.**
+Work through tasks one by one without planning overhead. Read the next task, do it, write the result, move to the next.
+
+**5. Maximum 3 `get` calls per task.**
+If you need more than 3 chunks for one task, you are over-reading. The answer is in fewer chunks than you think.
+
+**6. Never re-fetch a chunk already in context.**
+If you already retrieved `src/db.rs:10-169` for task 2, do not retrieve it again for task 14. It is already in your context.
+
+---
+
+### The workflow (repeat per task, no planning phase)
+
+**Step 1 — Orient**
+```bash
+git-semantic map "<natural language query>"
+```
+Read the output. If it names the function/type you need — skip to step 2 immediately.
+
+**Step 2 — Get only what this task needs**
+```bash
+git-semantic get <file:start-end>
+```
+Use the locations from the map output directly. Max 3 calls.
+
+**Step 3 — Search only if map description did not contain what you need**
+```bash
+git-semantic grep "<natural language query>"
+```
+Last resort. If the map named the thing, this step is skipped entirely.
+
+---
+
+### Priority order
+
+1. `git-semantic map "<query>"` — orient, read output carefully
+2. `git-semantic get <file:start-end>` — use map locations directly (max 3)
+3. `git-semantic grep "<query>"` — only if map was truly insufficient
+
+Lower score = more similar in grep results.
 <!-- end semantic:agentic-setup -->"#;
 
     let claude_md = PathBuf::from("CLAUDE.md");
+    const OLD_MARKER: &str = "<!-- gitsem:agentic-setup -->";
 
     if claude_md.exists() {
         let existing = std::fs::read_to_string(&claude_md)?;
@@ -412,9 +568,18 @@ Results show `[score] file:start-end` followed by the full code of the matched c
             println!("CLAUDE.md already contains semantic instructions — nothing to do.");
             return Ok(());
         }
-        let mut file = std::fs::OpenOptions::new().append(true).open(&claude_md)?;
-        use std::io::Write;
-        write!(file, "\n\n{}", INSTRUCTIONS)?;
+        // Replace old marker block entirely if present, otherwise append
+        if existing.contains(OLD_MARKER) {
+            // Strip everything between old markers and write fresh
+            let stripped =
+                strip_between(&existing, OLD_MARKER, "<!-- end gitsem:agentic-setup -->");
+            let new_content = format!("{}\n\n{}", stripped.trim(), INSTRUCTIONS);
+            std::fs::write(&claude_md, new_content)?;
+        } else {
+            let mut file = std::fs::OpenOptions::new().append(true).open(&claude_md)?;
+            use std::io::Write;
+            write!(file, "\n\n{}", INSTRUCTIONS)?;
+        }
     } else {
         std::fs::write(&claude_md, INSTRUCTIONS)?;
     }
@@ -435,7 +600,7 @@ fn claude_setup() -> Result<()> {
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tool_name',''))")
 if [ "$TOOL_NAME" = "Grep" ]; then
-  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': 'The Grep tool is blocked. Use git-semantic grep \"<natural language query>\" instead. Describe what the code does, not what it looks like.'}}))"
+  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': 'The Grep tool is blocked. Use the three-command workflow: (1) git-semantic map \"<query>\" to orient, (2) git-semantic get <file:start-end> to read a known chunk, (3) git-semantic grep \"<query>\" only if map is insufficient.'}}))"
   exit 0
 fi
 exit 0
@@ -444,8 +609,8 @@ exit 0
     let block_bash_grep = r#"#!/bin/bash
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('command',''))")
-if echo "$COMMAND" | grep -qP '(^|[|;&\s])\s*(grep|rg|git grep)\s' && ! echo "$COMMAND" | grep -qP 'git-semantic\s+grep'; then
-  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': 'grep, rg, and git grep are blocked. Use git-semantic grep \"<natural language query>\" instead. Describe what the code does, not what it looks like.'}}))"
+if echo "$COMMAND" | grep -qP '(^|[|;&\s])\s*(grep|rg|git grep)\s' && ! echo "$COMMAND" | grep -qP 'git-semantic\s+(grep|map|get)'; then
+  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': 'grep, rg, and git grep are blocked. Use the three-command workflow: (1) git-semantic map \"<query>\" to orient, (2) git-semantic get <file:start-end> to read a known chunk, (3) git-semantic grep \"<query>\" only if map is insufficient.'}}))"
   exit 0
 fi
 exit 0
@@ -455,7 +620,7 @@ exit 0
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tool_name',''))")
 if [ "$TOOL_NAME" = "Read" ]; then
-  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': 'Reading whole files is blocked. Use git-semantic grep \"<natural language query>\" first — it returns the exact function or block you need. Only read a file if semantic search cannot answer the question.'}}))"
+  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': 'Reading whole files is blocked. Use the three-command workflow: (1) git-semantic map \"<query>\" to orient and find the subsystem + entry points, (2) git-semantic get <file:start-end> to read a specific chunk, (3) git-semantic grep \"<query>\" only if map is insufficient.'}}))"
   exit 0
 fi
 exit 0
@@ -621,6 +786,31 @@ main()
     Ok(())
 }
 
+fn waste_bar(turns: &[u64], baseline: f64) -> String {
+    let blocks = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    let max = *turns.iter().max().unwrap_or(&1) as f64;
+    turns
+        .iter()
+        .enumerate()
+        .map(|(i, &t)| {
+            let height = ((t as f64 / max) * 7.0).round() as usize;
+            let bar = blocks[height.min(7)];
+            if i < 5 {
+                bar.to_string()
+            } else {
+                let ratio = t as f64 / baseline;
+                if ratio >= 5.0 {
+                    format!("\x1B[31m{}\x1B[0m", bar)
+                } else if ratio >= 2.5 {
+                    format!("\x1B[33m{}\x1B[0m", bar)
+                } else {
+                    bar.to_string()
+                }
+            }
+        })
+        .collect()
+}
+
 fn show_usage(max_sessions: usize) -> Result<()> {
     let projects_dir = dirs_home()?.join(".claude").join("projects");
     if !projects_dir.exists() {
@@ -672,10 +862,13 @@ fn show_usage(max_sessions: usize) -> Result<()> {
     println!("Project: {}", cwd.display());
     println!();
     println!(
-        "{:<14} {:<8} {:<12} {:<12} {:<10} {:<8}",
+        "{:<14} {:<8} {:<12} {:<12} {:<10} {:<10} GROWTH",
         "SESSION", "TURNS", "BASELINE", "LATEST", "WASTE", "TOTAL"
     );
-    println!("{}", "-".repeat(65));
+    println!("{}", "-".repeat(80));
+
+    let mut first = true;
+    let mut hottest: Option<(usize, u64, f64)> = None;
 
     for (_, path) in all_sessions.iter().take(max_sessions) {
         let session_id = path
@@ -700,22 +893,42 @@ fn show_usage(max_sessions: usize) -> Result<()> {
         };
 
         let waste_str = if waste >= 10.0 {
-            format!("{:.0}x !!!", waste)
+            format!("\x1B[31m{:.0}x !!!\x1B[0m", waste)
         } else if waste >= 5.0 {
-            format!("{:.0}x !", waste)
+            format!("\x1B[31m{:.0}x !\x1B[0m", waste)
+        } else if waste >= 2.5 {
+            format!("\x1B[33m{:.1}x\x1B[0m", waste)
         } else {
             format!("{:.1}x", waste)
         };
 
+        let bar = waste_bar(&turns, baseline);
+
+        let waste_pad = if waste_str.contains('\x1B') {
+            18 + 9
+        } else {
+            10
+        };
         println!(
-            "{:<14} {:<8} {:<12} {:<12} {:<10} {:<8}",
+            "{:<14} {:<8} {:<12} {:<12} {:<waste_pad$} {:<10} {}",
             &session_id[..14.min(session_id.len())],
             turns.len(),
             format_tokens(baseline as u64),
             format_tokens(latest as u64),
             waste_str,
             format_tokens(total),
+            bar,
+            waste_pad = waste_pad,
         );
+
+        if first {
+            if let Some((spike_turn, spike_val)) =
+                turns.iter().enumerate().skip(5).max_by_key(|(_, &v)| v)
+            {
+                hottest = Some((spike_turn + 1, *spike_val, baseline));
+            }
+            first = false;
+        }
     }
 
     println!();
@@ -723,6 +936,19 @@ fn show_usage(max_sessions: usize) -> Result<()> {
     println!("LATEST   = avg tokens/turn for last 3 turns");
     println!("WASTE    = LATEST / BASELINE  (1x = healthy, 10x+ = start fresh)");
     println!("TOTAL    = total tokens consumed in session");
+    println!("GROWTH   = sparkline per turn  \x1B[33m(yellow = 2.5x+)\x1B[0m  \x1B[31m(red = 5x+)\x1B[0m  first 5 turns = baseline");
+
+    if let Some((turn, val, base)) = hottest {
+        println!();
+        println!(
+            "Biggest spike (most recent session): turn {} — {} ({:.1}x baseline)",
+            turn,
+            format_tokens(val),
+            val as f64 / base
+        );
+        println!("  Why: context accumulation — each turn re-sends all prior tool results.");
+        println!("  Fix: start fresh session, or use git-semantic map+get instead of grep.");
+    }
 
     Ok(())
 }
@@ -771,6 +997,121 @@ fn format_tokens(n: u64) -> String {
     } else {
         format!("{}", n)
     }
+}
+
+fn print_subsystem(subsystem: &map::Subsystem, edges: &[map::Edge]) {
+    println!("## {} — {}", subsystem.name, subsystem.description);
+
+    // Files that belong to this subsystem
+    let subsystem_files: std::collections::HashSet<&str> =
+        subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+
+    // Entry points: files outside this subsystem that call into it
+    let mut entry_points: Vec<(&str, &[String])> = edges
+        .iter()
+        .filter(|e| {
+            subsystem_files.contains(e.to.as_str()) && !subsystem_files.contains(e.from.as_str())
+        })
+        .map(|e| (e.from.as_str(), e.via.as_slice()))
+        .collect();
+    entry_points.sort_by_key(|(f, _)| *f);
+    entry_points.dedup_by_key(|(f, _)| *f);
+
+    if !entry_points.is_empty() {
+        println!("  entry points:");
+        for (file, via) in &entry_points {
+            if via.is_empty() {
+                println!("    {}", file);
+            } else {
+                println!("    {} (via {})", file, via.join(", "));
+            }
+        }
+    }
+
+    for chunk in &subsystem.chunks {
+        println!("  {}", chunk.display());
+    }
+    println!();
+}
+
+fn map_command(query: Option<&str>) -> Result<()> {
+    let db = db::Database::init().context("Failed to initialize database")?;
+
+    match query {
+        None => {
+            let subsystems = db
+                .all_subsystems()
+                .context("Failed to load subsystems from database")?;
+
+            if subsystems.is_empty() {
+                println!(
+                    "Semantic map is empty. Run `git-semantic index` then `git-semantic hydrate`."
+                );
+                return Ok(());
+            }
+
+            for subsystem in &subsystems {
+                let files: Vec<&str> = subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+                let edges = db.edges_into(&files).context("Failed to load edges")?;
+                print_subsystem(subsystem, &edges);
+            }
+        }
+        Some(q) => {
+            let query_embedding = embed::generate_embedding(q).context("Failed to embed query")?;
+
+            let subsystem = db
+                .query_map(&query_embedding)
+                .context("Failed to query map")?;
+
+            match subsystem {
+                None => println!(
+                    "Semantic map is empty. Run `git-semantic index` then `git-semantic hydrate`."
+                ),
+                Some(subsystem) => {
+                    let files: Vec<&str> =
+                        subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+                    let edges = db.edges_into(&files).context("Failed to load edges")?;
+                    print_subsystem(&subsystem, &edges);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn get_command(location: &str) -> Result<()> {
+    let chunk_ref = map::ChunkRef::parse(location).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid location '{}'. Expected format: file:start-end (e.g. src/db.rs:12-34)",
+            location
+        )
+    })?;
+
+    let db = db::Database::init().context("Failed to initialize database")?;
+    let chunk = db
+        .get_chunk_by_location(
+            &chunk_ref.file,
+            chunk_ref.start_line as i64,
+            chunk_ref.end_line as i64,
+        )
+        .context("Failed to query database")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No chunks found overlapping {}:{}-{}. Run `git-semantic hydrate` first.",
+                chunk_ref.file,
+                chunk_ref.start_line,
+                chunk_ref.end_line
+            )
+        })?;
+
+    println!(
+        "// {}:{}-{}",
+        chunk.file_path, chunk.start_line, chunk.end_line
+    );
+    println!("{}", chunk.content);
+
+    Ok(())
 }
 
 fn dirs_home() -> Result<PathBuf> {

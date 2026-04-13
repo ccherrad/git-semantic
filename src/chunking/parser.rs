@@ -41,6 +41,28 @@ pub fn parse_with_tree_sitter(text: &str, language: SupportedLanguage) -> Result
             start_line: 0,
             end_line: text.lines().count(),
         });
+    } else {
+        // If the first chunk doesn't start at line 0, there's a preamble
+        // (imports, constants, top-level declarations) that would otherwise
+        // be invisible to the index. Capture it as its own chunk.
+        let first_start = chunks.iter().map(|c| c.start_line).min().unwrap_or(0);
+        if first_start > 0 {
+            let preamble: String = text
+                .lines()
+                .take(first_start)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !preamble.trim().is_empty() {
+                chunks.insert(
+                    0,
+                    CodeChunk {
+                        text: preamble,
+                        start_line: 0,
+                        end_line: first_start,
+                    },
+                );
+            }
+        }
     }
 
     Ok(chunks)

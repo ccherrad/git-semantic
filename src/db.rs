@@ -78,15 +78,199 @@ impl Database {
         )
         .context("Failed to create vec_metadata table")?;
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS subsystems (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                chunks_json TEXT NOT NULL
+            );",
+        )
+        .context("Failed to create subsystems table")?;
+
+        let subsystem_vec_exists: bool = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='vec_subsystems'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+            > 0;
+
+        if !subsystem_vec_exists {
+            let create_subsystem_vec = format!(
+                "CREATE VIRTUAL TABLE vec_subsystems USING vec0(embedding FLOAT[{}]);",
+                dim
+            );
+            conn.execute_batch(&create_subsystem_vec)
+                .context("Failed to create vec_subsystems virtual table")?;
+        }
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_file TEXT NOT NULL,
+                to_file TEXT NOT NULL,
+                via_json TEXT NOT NULL
+            );",
+        )
+        .context("Failed to create edges table")?;
+
         Ok(Database { conn })
     }
 
     pub fn clear(&self) -> Result<()> {
         self.conn
             .execute_batch(
-                "DELETE FROM vec_metadata; DELETE FROM vec_chunks; DELETE FROM code_chunks;",
+                "DELETE FROM vec_metadata;
+                 DELETE FROM vec_chunks;
+                 DELETE FROM code_chunks;
+                 DELETE FROM subsystems;
+                 DELETE FROM vec_subsystems;
+                 DELETE FROM edges;",
             )
             .context("Failed to clear database")
+    }
+
+    pub fn insert_subsystem(&self, subsystem: &crate::map::Subsystem) -> Result<()> {
+        use zerocopy::IntoBytes;
+
+        let chunks_json = serde_json::to_string(&subsystem.chunks)
+            .context("Failed to serialize subsystem chunks")?;
+
+        self.conn.execute(
+            "INSERT INTO subsystems (name, description, chunks_json) VALUES (?1, ?2, ?3)",
+            params![&subsystem.name, &subsystem.description, &chunks_json],
+        )?;
+
+        let subsystem_id = self.conn.last_insert_rowid();
+
+        self.conn.execute(
+            "INSERT INTO vec_subsystems (rowid, embedding) VALUES (?1, ?2)",
+            params![subsystem_id, subsystem.description_embedding.as_bytes()],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn insert_edge(&self, edge: &crate::map::Edge) -> Result<()> {
+        let via_json = serde_json::to_string(&edge.via).context("Failed to serialize edge via")?;
+        self.conn.execute(
+            "INSERT INTO edges (from_file, to_file, via_json) VALUES (?1, ?2, ?3)",
+            params![&edge.from, &edge.to, &via_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn query_map(&self, query_embedding: &[f32]) -> Result<Option<crate::map::Subsystem>> {
+        use zerocopy::IntoBytes;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT s.name, s.description, s.chunks_json, v.distance
+             FROM vec_subsystems v
+             JOIN subsystems s ON v.rowid = s.id
+             WHERE v.embedding MATCH ?1 AND k = 1
+             ORDER BY distance",
+        )?;
+
+        let mut rows = stmt.query_map(params![query_embedding.as_bytes()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        if let Some(row) = rows.next() {
+            let (name, description, chunks_json) = row?;
+            let chunks: Vec<crate::map::ChunkRef> = serde_json::from_str(&chunks_json)
+                .map_err(|e| anyhow::anyhow!("Failed to parse chunks: {}", e))?;
+            Ok(Some(crate::map::Subsystem {
+                name,
+                description,
+                description_embedding: vec![],
+                chunks,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn all_subsystems(&self) -> Result<Vec<crate::map::Subsystem>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, description, chunks_json FROM subsystems ORDER BY id")?;
+
+        let subsystems = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .map(|row| {
+                let (name, description, chunks_json) = row?;
+                let chunks: Vec<crate::map::ChunkRef> = serde_json::from_str(&chunks_json)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse chunks: {}", e))?;
+                Ok(crate::map::Subsystem {
+                    name,
+                    description,
+                    description_embedding: vec![],
+                    chunks,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(subsystems)
+    }
+
+    pub fn edges_into(&self, subsystem_files: &[&str]) -> Result<Vec<crate::map::Edge>> {
+        if subsystem_files.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let n = subsystem_files.len();
+        let in_placeholders = (1..=n)
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let not_in_placeholders = (n + 1..=2 * n)
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "SELECT from_file, to_file, via_json FROM edges
+             WHERE to_file IN ({}) AND from_file NOT IN ({})",
+            in_placeholders, not_in_placeholders
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let params: Vec<&dyn rusqlite::ToSql> = subsystem_files
+            .iter()
+            .chain(subsystem_files.iter())
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
+
+        let edges = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .map(|row| {
+                let (from, to, via_json) = row?;
+                let via: Vec<String> = serde_json::from_str(&via_json)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse via: {}", e))?;
+                Ok(crate::map::Edge { from, to, via })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(edges)
     }
 
     pub fn insert_chunk(&self, chunk: &CodeChunk) -> Result<()> {
@@ -133,6 +317,93 @@ impl Database {
             .context("Failed to insert metadata")?;
 
         Ok(())
+    }
+
+    pub fn get_chunk_by_location(
+        &self,
+        file_path: &str,
+        start_line: i64,
+        end_line: i64,
+    ) -> Result<Option<CodeChunk>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_path, start_line, end_line, content, embedding
+             FROM code_chunks
+             WHERE file_path = ?1 AND start_line = ?2 AND end_line = ?3
+             LIMIT 1",
+        )?;
+
+        let mut rows = stmt.query_map(params![file_path, start_line, end_line], |row| {
+            let embedding_blob: Vec<u8> = row.get(4)?;
+            let embedding: Vec<f32> = bincode::deserialize(&embedding_blob)
+                .map_err(|_e| rusqlite::Error::InvalidQuery)?;
+            Ok(CodeChunk {
+                file_path: row.get(0)?,
+                start_line: row.get(1)?,
+                end_line: row.get(2)?,
+                content: row.get(3)?,
+                embedding,
+                distance: None,
+            })
+        })?;
+
+        if let Some(chunk) = rows.next().transpose()? {
+            return Ok(Some(chunk));
+        }
+
+        self.get_chunks_overlapping(file_path, start_line, end_line)
+    }
+
+    fn get_chunks_overlapping(
+        &self,
+        file_path: &str,
+        start_line: i64,
+        end_line: i64,
+    ) -> Result<Option<CodeChunk>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_path, start_line, end_line, content, embedding
+             FROM code_chunks
+             WHERE file_path = ?1
+               AND start_line < ?3
+               AND end_line > ?2
+             ORDER BY start_line",
+        )?;
+
+        let chunks: Vec<CodeChunk> = stmt
+            .query_map(params![file_path, start_line, end_line], |row| {
+                let embedding_blob: Vec<u8> = row.get(4)?;
+                let embedding: Vec<f32> = bincode::deserialize(&embedding_blob)
+                    .map_err(|_e| rusqlite::Error::InvalidQuery)?;
+                Ok(CodeChunk {
+                    file_path: row.get(0)?,
+                    start_line: row.get(1)?,
+                    end_line: row.get(2)?,
+                    content: row.get(3)?,
+                    embedding,
+                    distance: None,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+
+        let merged_start = chunks.first().unwrap().start_line;
+        let merged_end = chunks.last().unwrap().end_line;
+        let merged_content = chunks
+            .iter()
+            .map(|c| c.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(Some(CodeChunk {
+            file_path: file_path.to_string(),
+            start_line: merged_start,
+            end_line: merged_end,
+            content: merged_content,
+            embedding: chunks.into_iter().next().unwrap().embedding,
+            distance: None,
+        }))
     }
 
     pub fn search_similar(&self, query_embedding: &[f32], limit: i64) -> Result<Vec<CodeChunk>> {

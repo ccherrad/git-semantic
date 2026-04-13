@@ -1,9 +1,9 @@
 [package]
 name = "gitsem"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["CHERRAD Charef <ccherrad@gmail.com>"]
-description = "A semantic search layer for Git repositories using vector embeddings"
+description = "Semantic search and spatial navigation for Git repositories — map, get, and grep for AI coding agents"
 readme = "README.md"
 repository = "https://github.com/ccherrad/git-semantic"
 license = "MIT OR Apache-2.0"
