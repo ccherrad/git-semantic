@@ -589,6 +589,7 @@ Lower score = more similar in grep results.
 }
 
 fn claude_setup() -> Result<()> {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     let hooks_dir = PathBuf::from(".claude/hooks");
@@ -722,9 +723,12 @@ main()
     for (name, content) in scripts {
         let path = hooks_dir.join(name);
         std::fs::write(&path, content).with_context(|| format!("Failed to write {}", name))?;
-        let mut perms = std::fs::metadata(&path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms)?;
+        #[cfg(unix)]
+        {
+            let mut perms = std::fs::metadata(&path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms)?;
+        }
         println!("  wrote .claude/hooks/{}", name);
     }
 
