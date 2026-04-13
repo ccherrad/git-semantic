@@ -285,6 +285,68 @@ git-semantic/
 
 ---
 
+## Technology Radar Alignment
+
+`git-semantic` is positioned at the intersection of several techniques on the [ThoughtWorks Technology Radar](https://www.thoughtworks.com/radar). Here is where the project stands against each relevant blip.
+
+---
+
+### [Curated Shared Instructions for Software Teams](https://www.thoughtworks.com/radar/techniques/curated-shared-instructions-for-software-teams) — Adopt
+
+> Committing team-wide reusable instructions (AGENTS.md, CLAUDE.md) to project repositories so that when a prompt is refined, the entire team benefits immediately.
+
+**Status: implemented.** `git-semantic enable claude` injects a `CLAUDE.md` block with mandatory navigation rules (map → get → grep) into the project repository. Versioned alongside the code, shared via git, idempotent. Every agent that opens the repo inherits the same behavior without manual setup.
+
+---
+
+### [Context Engineering](https://www.thoughtworks.com/radar/techniques/context-engineering) — Assess
+
+> Systematically designing and optimizing the information provided to LLMs during inference — structuring prompts, retrieved data, memory, and environmental signals to improve output quality and reduce token overhead.
+
+**Status: implemented.** The spatial map is a context engineering primitive — it gives the agent structural awareness at ~500 tokens instead of 3-5 turns of exploration. The `PreToolUse` hook system enforces retrieval discipline by blocking grep/rg and whole-file reads. The `git-semantic usage` waste ratio metric measures context engineering health directly.
+
+---
+
+### [On-Device Information Retrieval](https://www.thoughtworks.com/radar/techniques/on-device-information-retrieval) — Assess
+
+> Running search and retrieval-augmented generation entirely on local devices for privacy and efficiency, using sqlite-vec paired with a lightweight local inference model. ThoughtWorks specifically highlights EmbeddingGemma (300M parameters) as a promising option for resource-constrained environments.
+
+**Status: partially implemented, EmbeddingGemma coming soon.** `git-semantic` already uses sqlite-vec as its vector store — the same stack ThoughtWorks recommends. The local ONNX embedding path keeps all data fully on-device with no API calls. EmbeddingGemma support is on the roadmap as a direct response to this blip.
+
+---
+
+### [Anchoring Coding Agents to a Reference Application](https://www.thoughtworks.com/radar/techniques/anchoring-coding-agents-to-a-reference-application) — Assess
+
+> Providing coding agents with a live, compilable reference application instead of static templates — using an MCP server that exposes both reference code and commit diffs — so agents can reference living blueprints rather than stale documentation.
+
+**Status: coming soon.** The semantic index on the `semantic` branch is already a versioned, queryable representation of the codebase that evolves with every commit. Exposing it via an MCP server is a natural next step and is on the roadmap.
+
+---
+
+### [Team of Coding Agents](https://www.thoughtworks.com/radar/techniques/team-of-coding-agents) — Assess
+
+> Coordinating multiple AI agents with assigned roles working together on development tasks, enabling more sophisticated orchestrated workflows.
+
+**Status: coming soon.** The map is the prerequisite — agents need shared spatial awareness before roles and routing can work. Hook-based enforcement ensures consistent tool behavior across subagents. Scoped search per agent role (backend agent searches only backend subsystems, etc.) is the next layer.
+
+---
+
+### [Knowledge Flows Over Knowledge Stocks](https://www.thoughtworks.com/radar/techniques/knowledge-flows-over-knowledge-stocks) — Assess
+
+> Prioritizing how knowledge moves through an organization over simply accumulating it.
+
+**Status: architectural intent.** The `semantic` branch model is designed for flow: one person indexes, the whole team pulls via `git fetch`. The map is shared infrastructure — orientation cost paid once, amortized across every session and every developer. Whether this meaningfully changes knowledge dynamics at team scale is a hypothesis the project is built to test.
+
+---
+
+### [Spec-Driven Development](https://www.thoughtworks.com/radar/techniques/spec-driven-development) — Assess
+
+> Beginning with structured functional specifications progressively broken down for AI agents.
+
+**Status: not implemented.** Not on the near-term roadmap. Worth revisiting once context engineering and map-based navigation are mature.
+
+---
+
 ## License
 
 MIT OR Apache-2.0
