@@ -150,6 +150,36 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn is_indexable(path: &str) -> bool {
+    let skip_exts = [
+        "svg", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "tiff",
+        "pdf", "woff", "woff2", "ttf", "otf", "eot",
+        "mp3", "mp4", "wav", "ogg", "webm", "avi", "mov",
+        "zip", "tar", "gz", "bz2", "xz", "7z", "rar",
+        "exe", "dll", "so", "dylib", "a", "o",
+        "bin", "dat", "db", "sqlite", "sqlite3",
+        "lock",
+        "map",
+    ];
+    let skip_names = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock"];
+
+    let lower = path.to_lowercase();
+
+    if let Some(name) = std::path::Path::new(path).file_name().and_then(|n| n.to_str()) {
+        if skip_names.contains(&name) {
+            return false;
+        }
+    }
+
+    if let Some(ext) = std::path::Path::new(&lower).extension().and_then(|e| e.to_str()) {
+        if skip_exts.contains(&ext) {
+            return false;
+        }
+    }
+
+    true
+}
+
 fn collect_files(repo_path: &PathBuf) -> Result<Vec<PathBuf>> {
     let output = std::process::Command::new("git")
         .current_dir(repo_path)
@@ -163,6 +193,7 @@ fn collect_files(repo_path: &PathBuf) -> Result<Vec<PathBuf>> {
 
     let files = String::from_utf8_lossy(&output.stdout)
         .lines()
+        .filter(|line| is_indexable(line))
         .map(|line| repo_path.join(line))
         .collect();
 
@@ -261,13 +292,13 @@ fn index_codebase() -> Result<()> {
             let to_embed: Vec<(PathBuf, String)> = changes
                 .iter()
                 .filter_map(|c| match c {
-                    semantic_branch::FileChange::AddedOrModified(p) => {
+                    semantic_branch::FileChange::AddedOrModified(p) if is_indexable(p) => {
                         Some((repo_path.join(p), p.clone()))
                     }
-                    semantic_branch::FileChange::Renamed { to, .. } => {
+                    semantic_branch::FileChange::Renamed { to, .. } if is_indexable(to) => {
                         Some((repo_path.join(to), to.clone()))
                     }
-                    semantic_branch::FileChange::Deleted(_) => None,
+                    _ => None,
                 })
                 .collect();
 
