@@ -7,6 +7,7 @@ use std::process::Command;
 pub enum EmbeddingProviderType {
     OpenAI,
     Onnx,
+    Gemma,
 }
 
 impl std::str::FromStr for EmbeddingProviderType {
@@ -16,8 +17,9 @@ impl std::str::FromStr for EmbeddingProviderType {
         match s.to_lowercase().as_str() {
             "openai" => Ok(EmbeddingProviderType::OpenAI),
             "onnx" | "local" => Ok(EmbeddingProviderType::Onnx),
+            "gemma" | "embeddinggemma" => Ok(EmbeddingProviderType::Gemma),
             _ => Err(anyhow::anyhow!(
-                "Unknown provider: {}. Valid options: openai, onnx",
+                "Unknown provider: {}. Valid options: openai, onnx, gemma",
                 s
             )),
         }
@@ -29,6 +31,7 @@ impl std::fmt::Display for EmbeddingProviderType {
         match self {
             EmbeddingProviderType::OpenAI => write!(f, "openai"),
             EmbeddingProviderType::Onnx => write!(f, "onnx"),
+            EmbeddingProviderType::Gemma => write!(f, "gemma"),
         }
     }
 }
@@ -38,6 +41,7 @@ pub struct EmbeddingConfig {
     pub provider: EmbeddingProviderType,
     pub openai: OpenAIConfig,
     pub onnx: ONNXConfig,
+    pub gemma: GemmaConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,12 +60,22 @@ pub struct ONNXConfig {
     pub max_length: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GemmaConfig {
+    pub api_key: Option<String>,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub embedding_dim: usize,
+    pub max_tokens: usize,
+}
+
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             provider: EmbeddingProviderType::Onnx,
             openai: OpenAIConfig::default(),
             onnx: ONNXConfig::default(),
+            gemma: GemmaConfig::default(),
         }
     }
 }
@@ -84,6 +98,18 @@ impl Default for ONNXConfig {
             tokenizer_path: None,
             embedding_dim: 384,
             max_length: 512,
+        }
+    }
+}
+
+impl Default for GemmaConfig {
+    fn default() -> Self {
+        Self {
+            api_key: std::env::var("GEMMA_API_KEY").ok(),
+            model: "embedding-gemma-300m".to_string(),
+            base_url: std::env::var("GEMMA_BASE_URL").ok(),
+            embedding_dim: 768,
+            max_tokens: 2000,
         }
     }
 }
@@ -142,6 +168,7 @@ impl EmbeddingConfig {
             provider,
             openai: OpenAIConfig::load(),
             onnx: ONNXConfig::load(),
+            gemma: GemmaConfig::load(),
         })
     }
 
@@ -150,6 +177,7 @@ impl EmbeddingConfig {
         Self::set_git_config("semantic.provider", &self.provider.to_string())?;
         self.openai.save()?;
         self.onnx.save()?;
+        self.gemma.save()?;
         Ok(())
     }
 
@@ -177,6 +205,18 @@ impl EmbeddingConfig {
         }
         if let Some(path) = &config.onnx.tokenizer_path {
             println!("  tokenizerPath = {}", path.display());
+        }
+        println!();
+
+        println!("[semantic.gemma]");
+        println!("  model = {}", config.gemma.model);
+        println!("  embeddingDim = {}", config.gemma.embedding_dim);
+        println!("  maxTokens = {}", config.gemma.max_tokens);
+        if config.gemma.api_key.is_some() {
+            println!("  apiKey = ***set via GEMMA_API_KEY***");
+        }
+        if let Some(url) = &config.gemma.base_url {
+            println!("  baseUrl = {}", url);
         }
 
         Ok(())
@@ -235,6 +275,40 @@ impl ONNXConfig {
         }
         if let Some(path) = &self.tokenizer_path {
             EmbeddingConfig::set_git_config("semantic.onnx.tokenizerPath", path.to_str().unwrap())?;
+        }
+
+        Ok(())
+    }
+}
+
+impl GemmaConfig {
+    fn load() -> Self {
+        Self {
+            api_key: std::env::var("GEMMA_API_KEY").ok(),
+            model: EmbeddingConfig::get_git_config("semantic.gemma.model")
+                .unwrap_or_else(|| "embedding-gemma-300m".to_string()),
+            base_url: EmbeddingConfig::get_git_config("semantic.gemma.baseUrl")
+                .or_else(|| std::env::var("GEMMA_BASE_URL").ok()),
+            embedding_dim: EmbeddingConfig::get_git_config("semantic.gemma.embeddingDim")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(768),
+            max_tokens: EmbeddingConfig::get_git_config("semantic.gemma.maxTokens")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2000),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn save(&self) -> Result<()> {
+        EmbeddingConfig::set_git_config("semantic.gemma.model", &self.model)?;
+        EmbeddingConfig::set_git_config(
+            "semantic.gemma.embeddingDim",
+            &self.embedding_dim.to_string(),
+        )?;
+        EmbeddingConfig::set_git_config("semantic.gemma.maxTokens", &self.max_tokens.to_string())?;
+
+        if let Some(url) = &self.base_url {
+            EmbeddingConfig::set_git_config("semantic.gemma.baseUrl", url)?;
         }
 
         Ok(())
