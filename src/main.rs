@@ -1,5 +1,7 @@
+mod audit;
 mod chunking;
 mod clustering;
+mod cognitive_debt;
 mod db;
 mod embed;
 mod embeddings;
@@ -81,6 +83,40 @@ enum Commands {
         location: String,
     },
 
+    #[command(about = "Audit commits for cognitive debt")]
+    Audit {
+        #[arg(long, help = "Audit a specific commit SHA")]
+        commit: Option<String>,
+
+        #[arg(long, help = "Audit all commits since this SHA")]
+        since: Option<String>,
+
+        #[arg(long, help = "Backfill all history (last 500 commits)")]
+        all: bool,
+
+        #[arg(long, help = "Scan for zombie AI commits (>30 days unendorsed)")]
+        check_zombies: bool,
+    },
+
+    #[command(about = "Endorse an activity item as reviewed or understood")]
+    Endorse {
+        #[arg(help = "Commit SHA of the activity item to endorse")]
+        sha: String,
+
+        #[arg(
+            long,
+            default_value = "endorsed",
+            help = "Endorsement status: reviewed | endorsed"
+        )]
+        status: String,
+    },
+
+    #[command(about = "Show cognitive debt heatmap by subsystem")]
+    Debt {
+        #[arg(long, help = "Filter by subsystem name")]
+        subsystem: Option<String>,
+    },
+
     #[command(about = "Get and set semantic options")]
     Config {
         #[arg(help = "Configuration key (e.g., semantic.provider)")]
@@ -135,6 +171,31 @@ fn main() -> Result<()> {
             } else {
                 show_usage(sessions)?;
             }
+        }
+        Commands::Audit {
+            commit,
+            since,
+            all,
+            check_zombies,
+        } => {
+            let repo_path = std::path::PathBuf::from(".");
+            let since = if all {
+                Some("HEAD~500".to_string())
+            } else {
+                since
+            };
+            audit::run_audit(
+                &repo_path,
+                since.as_deref(),
+                commit.as_deref(),
+                check_zombies,
+            )?;
+        }
+        Commands::Endorse { sha, status } => {
+            endorse_command(&sha, &status)?;
+        }
+        Commands::Debt { subsystem } => {
+            debt_command(subsystem.as_deref())?;
         }
         Commands::Config {
             key,
@@ -418,6 +479,33 @@ fn hydrate_from_branch() -> Result<()> {
     }
 
     println!("Hydrated {} chunks into local index.", total_chunks);
+
+    let repo_path = PathBuf::from(".");
+    if let Ok(store) = cognitive_debt::DebtStore::open(&repo_path) {
+        match store.read_all_activity() {
+            Ok(items) => {
+                if !items.is_empty() {
+                    db.clear_activity_items().ok();
+                    let count = items.len();
+                    for item in &items {
+                        db.upsert_activity_item(item).ok();
+                        let endorsements = store.read_endorsements(&item.id).unwrap_or_default();
+                        for record in &endorsements {
+                            db.insert_endorsement(record).ok();
+                        }
+                    }
+                    store.commit().ok();
+                    println!(
+                        "Hydrated {} activity item(s) from cognitive-debt branch.",
+                        count
+                    );
+                }
+            }
+            Err(_) => {
+                store.commit().ok();
+            }
+        }
+    }
 
     match semantic_branch::read_semantic_map_from_branch(&repo_path) {
         Ok(map) => {
@@ -780,6 +868,42 @@ main()
         println!("  wrote .claude/settings.json");
     }
 
+    // --- git post-commit hook ---
+    let git_hooks_dir = PathBuf::from(".git/hooks");
+    if git_hooks_dir.exists() {
+        let post_commit_path = git_hooks_dir.join("post-commit");
+        let post_commit_script = "#!/bin/bash\ngit-semantic audit --commit HEAD\n";
+
+        let should_write = if post_commit_path.exists() {
+            let existing = std::fs::read_to_string(&post_commit_path).unwrap_or_default();
+            !existing.contains("git-semantic audit")
+        } else {
+            true
+        };
+
+        if should_write {
+            if post_commit_path.exists() {
+                let existing = std::fs::read_to_string(&post_commit_path).unwrap_or_default();
+                let appended = format!(
+                    "{}\n# git-semantic cognitive debt audit\ngit-semantic audit --commit HEAD\n",
+                    existing.trim()
+                );
+                std::fs::write(&post_commit_path, appended)?;
+            } else {
+                std::fs::write(&post_commit_path, post_commit_script)?;
+            }
+            #[cfg(unix)]
+            {
+                let mut perms = std::fs::metadata(&post_commit_path)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&post_commit_path, perms)?;
+            }
+            println!("  wrote .git/hooks/post-commit");
+        } else {
+            println!("  .git/hooks/post-commit already configured — nothing to do.");
+        }
+    }
+
     // --- CLAUDE.md ---
     agentic_setup()?;
 
@@ -787,6 +911,7 @@ main()
     println!("  • block grep, rg, git grep — redirect to git-semantic grep");
     println!("  • block whole-file reads — redirect to git-semantic grep");
     println!("  • warn when token usage grows 5x+ from session baseline");
+    println!("  • auto-audit every commit for cognitive debt (post-commit hook)");
     Ok(())
 }
 
@@ -1114,6 +1239,185 @@ fn get_command(location: &str) -> Result<()> {
         chunk.file_path, chunk.start_line, chunk.end_line
     );
     println!("{}", chunk.content);
+
+    Ok(())
+}
+
+fn endorse_command(sha: &str, status_str: &str) -> Result<()> {
+    use cognitive_debt::{DebtStore, EndorsementRecord, EndorsementStatus};
+
+    let status = match status_str {
+        "reviewed" => EndorsementStatus::Reviewed,
+        "endorsed" => EndorsementStatus::Endorsed,
+        other => anyhow::bail!("Unknown status '{}'. Use: reviewed | endorsed", other),
+    };
+
+    let author = std::process::Command::new("git")
+        .args(["config", "user.email"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let repo_path = PathBuf::from(".");
+    let store = DebtStore::open(&repo_path)?;
+
+    let record = EndorsementRecord {
+        sha: sha.to_string(),
+        status,
+        author,
+        timestamp: cognitive_debt::now_rfc3339(),
+    };
+
+    store.write_endorsement(&record)?;
+
+    let db = db::Database::init()?;
+    db.insert_endorsement(&record)?;
+
+    store.commit()?;
+
+    println!("Endorsed {} as '{}'.", &sha[..8.min(sha.len())], status_str);
+    Ok(())
+}
+
+fn debt_command(subsystem_filter: Option<&str>) -> Result<()> {
+    use cognitive_debt::{Classification, EndorsementStatus};
+
+    let db = db::Database::init().context("Failed to initialize database")?;
+    let items = db
+        .all_activity_items()
+        .context("Failed to load activity items")?;
+
+    if items.is_empty() {
+        println!(
+            "No activity items found. Run `git-semantic audit` first, then `git-semantic hydrate`."
+        );
+        return Ok(());
+    }
+
+    let items: Vec<_> = if let Some(filter) = subsystem_filter {
+        items
+            .into_iter()
+            .filter(|i| i.subsystem == filter)
+            .collect()
+    } else {
+        items
+    };
+
+    let mut subsystems: std::collections::HashMap<String, (usize, usize, usize, f32, usize)> =
+        std::collections::HashMap::new();
+
+    for item in &items {
+        if matches!(item.endorsement_status, EndorsementStatus::Excluded) {
+            continue;
+        }
+        let entry = subsystems
+            .entry(item.subsystem.clone())
+            .or_insert((0, 0, 0, 0.0, 0));
+        entry.0 += 1;
+        if matches!(
+            item.endorsement_status,
+            EndorsementStatus::Endorsed | EndorsementStatus::Reviewed
+        ) {
+            entry.1 += 1;
+        } else {
+            entry.2 += 1;
+        }
+        entry.3 += item.cognitive_friction_score;
+        if item.zombie {
+            entry.4 += 1;
+        }
+    }
+
+    println!(
+        "\n{:<20} {:<7} {:<10} {:<12} {:<10} {:<8} STATUS",
+        "SUBSYSTEM", "ITEMS", "ENDORSED", "UNENDORSED", "AVG FRIC", "ZOMBIES"
+    );
+    println!("{}", "-".repeat(80));
+
+    let mut subsystem_list: Vec<_> = subsystems.iter().collect();
+    subsystem_list.sort_by(|a, b| {
+        let a_unendorsed = a.1 .2;
+        let b_unendorsed = b.1 .2;
+        b_unendorsed.cmp(&a_unendorsed)
+    });
+
+    for (name, (total, endorsed, unendorsed, friction_sum, zombies)) in &subsystem_list {
+        let avg_friction = if *total > 0 {
+            friction_sum / *total as f32
+        } else {
+            0.0
+        };
+
+        let status = if *zombies > 0 {
+            "\x1B[31m██ ZOMBIE\x1B[0m".to_string()
+        } else if *unendorsed == 0 {
+            "\x1B[32m✓ healthy\x1B[0m".to_string()
+        } else {
+            let pct = *endorsed as f32 / *total as f32;
+            if pct < 0.5 {
+                "\x1B[31m██ CRITICAL\x1B[0m".to_string()
+            } else {
+                "\x1B[33m▓ WARNING\x1B[0m".to_string()
+            }
+        };
+
+        let zombie_str = if *zombies > 0 {
+            format!("\x1B[31m{}\x1B[0m", zombies)
+        } else {
+            "0".to_string()
+        };
+
+        println!(
+            "{:<20} {:<7} {:<10} {:<12} {:<10} {:<8} {}",
+            &name[..20.min(name.len())],
+            total,
+            endorsed,
+            unendorsed,
+            format!("{:.2}", avg_friction),
+            zombie_str,
+            status,
+        );
+    }
+
+    println!();
+
+    let risk_items: Vec<_> = items
+        .iter()
+        .filter(|i| {
+            matches!(i.classification, Classification::Risk)
+                && !matches!(
+                    i.endorsement_status,
+                    EndorsementStatus::Endorsed | EndorsementStatus::Excluded
+                )
+        })
+        .collect();
+
+    if !risk_items.is_empty() {
+        println!("⚠  {} unendorsed RISK item(s):", risk_items.len());
+        for item in risk_items.iter().take(5) {
+            println!(
+                "   {} [{}] {}",
+                &item.id[..8.min(item.id.len())],
+                item.subsystem,
+                item.title
+            );
+        }
+        println!();
+    }
+
+    let zombie_items: Vec<_> = items.iter().filter(|i| i.zombie).collect();
+    if !zombie_items.is_empty() {
+        println!("☠  {} zombie(s) detected:", zombie_items.len());
+        for item in zombie_items.iter().take(5) {
+            println!(
+                "   {} [{}] {}",
+                &item.id[..8.min(item.id.len())],
+                item.subsystem,
+                item.title
+            );
+        }
+        println!();
+    }
 
     Ok(())
 }
