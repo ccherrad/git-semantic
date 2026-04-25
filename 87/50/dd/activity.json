@@ -1,0 +1,19 @@
+{
+  "id": "8750dddd83d70113856b5b1616b6a49c73710f02",
+  "branch": "feat/cognitive-debt-mitigation",
+  "classification": "new_feature",
+  "subsystem": "src",
+  "title": "feat(cognitive-debt): add offline debt detection and management pipeline",
+  "summary": "Introduces git-native cognitive debt tracking with zero LLM/network\n  dependency. All signals derived from git objects only.\n\n  New commands:\n  - `audit` — walks commits, scores friction, writes to cognitive-debt/v1\n    orphan branch (sharded JSON, Entire-style layout)\n  - `endorse <sha>` — records reviewed/endorsed status on branch\n  - `debt` — terminal heatmap: subsystems × friction × zombies\n\n  New modules:\n  - cognitive_debt: ActivityItem, EndorsementRecord, DebtStore (branch r/w)\n  - audit: Agent-Attribution trailer parsing, keyword fallback, path-based\n    classification, friction scoring (complexity delta + doc gap + author\n    churn), subsystem matching, zombie detection\n\n  Storage model: cognitive-debt/v1 orphan branch is source of truth;\n  semantic.db gains activity_items + endorsements tables as local cache.\n\n  Extends hydrate to pull activity items from branch into DB.\n  Extends `enable claude` to write .git/hooks/post-commit for auto-audit.\n\n  AI-free zone enforcement (auth/, payments/, migrations/) forces `risk`\n  classification regardless of commit message content.",
+  "commits": [
+    "8750dddd83d70113856b5b1616b6a49c73710f02"
+  ],
+  "since_sha": "8750dddd83d70113856b5b1616b6a49c73710f02",
+  "until_sha": "8750dddd83d70113856b5b1616b6a49c73710f02",
+  "cognitive_friction_score": 0.49760112,
+  "ai_attributed": false,
+  "attribution_pct": null,
+  "zombie": false,
+  "endorsement_status": "unendorsed",
+  "audited_at": "2026-04-25T19:48:22Z"
+}
