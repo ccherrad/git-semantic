@@ -19,7 +19,6 @@ exclude = [
 anyhow = "1.0.102"
 bincode = "1.3.3"
 clap = { version = "=4.5.23", features = ["derive"] }
-gix = "0.81.0"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
