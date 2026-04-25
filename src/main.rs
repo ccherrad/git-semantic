@@ -419,6 +419,7 @@ fn hydrate_from_branch() -> Result<()> {
 
     println!("Hydrated {} chunks into local index.", total_chunks);
 
+    let repo_path = PathBuf::from(".");
     match semantic_branch::read_semantic_map_from_branch(&repo_path) {
         Ok(map) => {
             for subsystem in &map.subsystems {
@@ -713,11 +714,22 @@ def main():
 main()
 "#;
 
+    let capture_session = r#"#!/bin/bash
+INPUT=$(cat)
+SESSION_ID=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null)
+if [ -n "$SESSION_ID" ]; then
+  git-semantic session capture --session-id "$SESSION_ID" 2>/dev/null || true
+  git push origin cognitive-debt/v1 2>/dev/null || true
+fi
+exit 0
+"#;
+
     let scripts: &[(&str, &str)] = &[
         ("block-grep.sh", block_grep),
         ("block-bash-grep.sh", block_bash_grep),
         ("block-read.sh", block_read),
         ("token-monitor.py", token_monitor),
+        ("capture-session.sh", capture_session),
     ];
 
     for (name, content) in scripts {
@@ -770,6 +782,11 @@ main()
         "matcher": ".*",
         "hooks": [{{ "type": "command", "command": ".claude/hooks/token-monitor.py" }}]
       }}
+    ],
+    "Stop": [
+      {{
+        "hooks": [{{ "type": "command", "command": ".claude/hooks/capture-session.sh" }}]
+      }}
     ]
   }}
 }}
@@ -780,6 +797,42 @@ main()
         println!("  wrote .claude/settings.json");
     }
 
+    // --- git post-commit hook ---
+    let git_hooks_dir = PathBuf::from(".git/hooks");
+    if git_hooks_dir.exists() {
+        let post_commit_path = git_hooks_dir.join("post-commit");
+        let post_commit_script = "#!/bin/bash\ngit-semantic audit --commit HEAD\ngit push origin cognitive-debt/v1 2>/dev/null || true\n";
+
+        let should_write = if post_commit_path.exists() {
+            let existing = std::fs::read_to_string(&post_commit_path).unwrap_or_default();
+            !existing.contains("git-semantic audit")
+        } else {
+            true
+        };
+
+        if should_write {
+            if post_commit_path.exists() {
+                let existing = std::fs::read_to_string(&post_commit_path).unwrap_or_default();
+                let appended = format!(
+                    "{}\n# git-semantic cognitive debt audit\ngit-semantic audit --commit HEAD\ngit push origin cognitive-debt/v1 2>/dev/null || true\n",
+                    existing.trim()
+                );
+                std::fs::write(&post_commit_path, appended)?;
+            } else {
+                std::fs::write(&post_commit_path, post_commit_script)?;
+            }
+            #[cfg(unix)]
+            {
+                let mut perms = std::fs::metadata(&post_commit_path)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&post_commit_path, perms)?;
+            }
+            println!("  wrote .git/hooks/post-commit");
+        } else {
+            println!("  .git/hooks/post-commit already configured — nothing to do.");
+        }
+    }
+
     // --- CLAUDE.md ---
     agentic_setup()?;
 
@@ -787,6 +840,7 @@ main()
     println!("  • block grep, rg, git grep — redirect to git-semantic grep");
     println!("  • block whole-file reads — redirect to git-semantic grep");
     println!("  • warn when token usage grows 5x+ from session baseline");
+    println!("  • auto-audit every commit for cognitive debt (post-commit hook)");
     Ok(())
 }
 
