@@ -1,0 +1,18 @@
+{
+  "id": "e5cebcb789b1601702087f46bf07e77f5e9f130b",
+  "branch": "main",
+  "classification": "other",
+  "title": "Update README.md",
+  "summary": "it will be updated with last changes.",
+  "commits": [
+    "e5cebcb789b1601702087f46bf07e77f5e9f130b"
+  ],
+  "since_sha": "e5cebcb789b1601702087f46bf07e77f5e9f130b",
+  "until_sha": "e5cebcb789b1601702087f46bf07e77f5e9f130b",
+  "cognitive_friction_score": 0.080000006,
+  "ai_attributed": false,
+  "attribution_pct": null,
+  "zombie": false,
+  "endorsement_status": "unendorsed",
+  "audited_at": "2026-04-26T21:16:58Z"
+}
