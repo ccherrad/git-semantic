@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const SEMANTIC_BRANCH: &str = "semantic";
+const SEMANTIC_BRANCH: &str = "semantic/v1";
 const INDEXED_AT_FILE: &str = ".indexed-at";
 const INDEX_STATE_FILE: &str = ".index-state";
 const SEMANTIC_MAP_FILE: &str = ".semantic-map.json";
