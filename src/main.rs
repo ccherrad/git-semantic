@@ -474,319 +474,55 @@ fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
     Ok(())
 }
 
-fn strip_between(text: &str, start_marker: &str, end_marker: &str) -> String {
-    let mut result = String::new();
-    let mut skip = false;
-    for line in text.lines() {
-        if line.contains(start_marker) {
-            skip = true;
-            continue;
-        }
-        if skip && line.contains(end_marker) {
-            skip = false;
-            continue;
-        }
-        if !skip {
-            result.push_str(line);
-            result.push('\n');
-        }
+fn claude_setup() -> Result<()> {
+    let agents_dir = PathBuf::from(".claude/agents");
+    std::fs::create_dir_all(&agents_dir).context("Failed to create .claude/agents")?;
+
+    let agent_path = agents_dir.join("git-semantic.md");
+
+    if agent_path.exists() {
+        println!(".claude/agents/git-semantic.md already exists — nothing to do.");
+        return Ok(());
     }
-    result
-}
 
-fn agentic_setup() -> Result<()> {
-    const MARKER: &str = "<!-- semantic:agentic-setup -->";
-    const INSTRUCTIONS: &str = r#"<!-- semantic:agentic-setup -->
-## Code Navigation — MANDATORY
-
-> **This rule applies to all agents and subagents without exception.**
-
-**NEVER use `grep`, `git grep`, `rg`, `ripgrep`, the Grep tool, or whole-file reads to explore code.**
-**Use the three-command workflow below for ALL code navigation.**
-
+    let agent_content = r#"---
+name: git-semantic
+description: Use this agent when searching, navigating, or understanding code in this repository. Invoke it when you need to find where something is implemented, understand how a subsystem works, locate a function or type, or explore code before making changes.
 ---
 
-### Critical rules
+You are a code navigation agent. Use the three git-semantic commands below to orient and retrieve code. Do not load whole files or use grep.
 
-**1. Retrieve per task, not upfront.**
-NEVER load code before you need it. NEVER bulk-read to "build context". Each task gets only the chunks it needs — retrieve, answer, move on.
-
-**2. The map output IS the answer. Do not re-search what the map already told you.**
-If `map` shows `embed: generate_embedding, create_provider` — you already know `create_provider` is in `embed.rs`. Use `get` immediately. Do NOT run `grep` to find it again.
-
-**3. If the map description contains the function/type name you need — stop. Use `get` on that chunk.**
-Map descriptions are derived from the actual code. A name in the description means the chunk contains it.
-
-**4. Do not use TodoWrite, TaskCreate, or TaskUpdate for sequential task lists.**
-Work through tasks one by one without planning overhead. Read the next task, do it, write the result, move to the next.
-
-**5. Maximum 3 `get` calls per task.**
-If you need more than 3 chunks for one task, you are over-reading. The answer is in fewer chunks than you think.
-
-**6. Never re-fetch a chunk already in context.**
-If you already retrieved `src/db.rs:10-169` for task 2, do not retrieve it again for task 14. It is already in your context.
-
----
-
-### The workflow (repeat per task, no planning phase)
+## Workflow
 
 **Step 1 — Orient**
 ```bash
 git-semantic map "<natural language query>"
 ```
-Read the output. If it names the function/type you need — skip to step 2 immediately.
+Read the output carefully. If it names the function or type you need, go directly to step 2.
 
-**Step 2 — Get only what this task needs**
+**Step 2 — Retrieve**
 ```bash
 git-semantic get <file:start-end>
 ```
-Use the locations from the map output directly. Max 3 calls.
+Use locations from the map output directly. Max 3 calls per task.
 
-**Step 3 — Search only if map description did not contain what you need**
+**Step 3 — Search (last resort)**
 ```bash
 git-semantic grep "<natural language query>"
 ```
-Last resort. If the map named the thing, this step is skipped entirely.
+Only if the map did not surface what you need. Lower score = more similar.
 
----
+## Rules
 
-### Priority order
-
-1. `git-semantic map "<query>"` — orient, read output carefully
-2. `git-semantic get <file:start-end>` — use map locations directly (max 3)
-3. `git-semantic grep "<query>"` — only if map was truly insufficient
-
-Lower score = more similar in grep results.
-<!-- end semantic:agentic-setup -->"#;
-
-    let claude_md = PathBuf::from("CLAUDE.md");
-    const OLD_MARKER: &str = "<!-- gitsem:agentic-setup -->";
-
-    if claude_md.exists() {
-        let existing = std::fs::read_to_string(&claude_md)?;
-        if existing.contains(MARKER) {
-            println!("CLAUDE.md already contains semantic instructions — nothing to do.");
-            return Ok(());
-        }
-        // Replace old marker block entirely if present, otherwise append
-        if existing.contains(OLD_MARKER) {
-            // Strip everything between old markers and write fresh
-            let stripped =
-                strip_between(&existing, OLD_MARKER, "<!-- end gitsem:agentic-setup -->");
-            let new_content = format!("{}\n\n{}", stripped.trim(), INSTRUCTIONS);
-            std::fs::write(&claude_md, new_content)?;
-        } else {
-            let mut file = std::fs::OpenOptions::new().append(true).open(&claude_md)?;
-            use std::io::Write;
-            write!(file, "\n\n{}", INSTRUCTIONS)?;
-        }
-    } else {
-        std::fs::write(&claude_md, INSTRUCTIONS)?;
-    }
-
-    println!("Injected semantic instructions into CLAUDE.md.");
-    Ok(())
-}
-
-fn claude_setup() -> Result<()> {
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    let hooks_dir = PathBuf::from(".claude/hooks");
-    std::fs::create_dir_all(&hooks_dir).context("Failed to create .claude/hooks")?;
-
-    // --- Hook scripts ---
-
-    let block_grep = r#"#!/bin/bash
-INPUT=$(cat)
-TOOL_NAME=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tool_name',''))")
-if [ "$TOOL_NAME" = "Grep" ]; then
-  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': 'The Grep tool is blocked. Use the three-command workflow: (1) git-semantic map \"<query>\" to orient, (2) git-semantic get <file:start-end> to read a known chunk, (3) git-semantic grep \"<query>\" only if map is insufficient.'}}))"
-  exit 0
-fi
-exit 0
+- Never re-fetch a chunk already in context.
+- The map output IS the answer — do not re-search what the map already named.
+- If the map description contains the function/type name you need, use `get` immediately.
+- Max 3 `get` calls per task. If you need more, you are over-reading.
 "#;
 
-    let block_bash_grep = r#"#!/bin/bash
-INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('command',''))")
-if echo "$COMMAND" | grep -qP '(^|[|;&\s])\s*(grep|rg|git grep)\s' && ! echo "$COMMAND" | grep -qP 'git-semantic\s+(grep|map|get)'; then
-  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': 'grep, rg, and git grep are blocked. Use the three-command workflow: (1) git-semantic map \"<query>\" to orient, (2) git-semantic get <file:start-end> to read a known chunk, (3) git-semantic grep \"<query>\" only if map is insufficient.'}}))"
-  exit 0
-fi
-exit 0
-"#;
-
-    let block_read = r#"#!/bin/bash
-INPUT=$(cat)
-TOOL_NAME=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tool_name',''))")
-if [ "$TOOL_NAME" = "Read" ]; then
-  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': 'Reading whole files is blocked. Use the three-command workflow: (1) git-semantic map \"<query>\" to orient and find the subsystem + entry points, (2) git-semantic get <file:start-end> to read a specific chunk, (3) git-semantic grep \"<query>\" only if map is insufficient.'}}))"
-  exit 0
-fi
-exit 0
-"#;
-
-    // Monitors token usage per turn and warns on waste factor growth.
-    // Reads the session JSONL at ~/.claude/projects/<project>/<session>.jsonl
-    // and injects a warning when tokens/turn grows 5x+ from session baseline.
-    let token_monitor = r#"#!/usr/bin/env python3
-import sys, json, os, glob
-
-def find_transcript(session_id):
-    projects_dir = os.path.expanduser("~/.claude/projects")
-    if not os.path.isdir(projects_dir):
-        return None
-    for project_dir in os.listdir(projects_dir):
-        path = os.path.join(projects_dir, project_dir, f"{session_id}.jsonl")
-        if os.path.exists(path):
-            return path
-    return None
-
-def parse_turns(transcript_path):
-    turns = []
-    try:
-        with open(transcript_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    r = json.loads(line)
-                    if r.get("type") == "assistant" and r.get("message", {}).get("usage"):
-                        u = r["message"]["usage"]
-                        total = (u.get("input_tokens", 0) + u.get("output_tokens", 0) +
-                                 u.get("cache_creation_input_tokens", 0) +
-                                 u.get("cache_read_input_tokens", 0))
-                        turns.append(total)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return turns
-
-def main():
-    raw = sys.stdin.read()
-    try:
-        hook_input = json.loads(raw)
-    except Exception:
-        print("{}")
-        return
-
-    session_id = hook_input.get("session_id", "")
-    if not session_id:
-        print("{}")
-        return
-
-    transcript = find_transcript(session_id)
-    if not transcript:
-        print("{}")
-        return
-
-    turns = parse_turns(transcript)
-    if len(turns) < 5:
-        print("{}")
-        return
-
-    baseline = sum(turns[:5]) / 5
-    current = sum(turns[-3:]) / min(3, len(turns))
-
-    if baseline == 0:
-        print("{}")
-        return
-
-    waste = current / baseline
-
-    if waste >= 10:
-        msg = (f"[git-semantic WARNING]: Token waste factor is {waste:.0f}x — "
-               f"turns started at {baseline/1000:.0f}k tokens, now at {current/1000:.0f}k. "
-               f"This session is burning quota rapidly. Consider starting a fresh session.")
-        print(json.dumps({"additionalContext": msg}))
-    elif waste >= 5:
-        msg = (f"[git-semantic]: Token usage is {waste:.0f}x higher than session start "
-               f"({baseline/1000:.0f}k → {current/1000:.0f}k tokens/turn). "
-               f"Cache may be degrading. If this keeps growing, start a fresh session.")
-        print(json.dumps({"additionalContext": msg}))
-    else:
-        print("{}")
-
-main()
-"#;
-
-    let scripts: &[(&str, &str)] = &[
-        ("block-grep.sh", block_grep),
-        ("block-bash-grep.sh", block_bash_grep),
-        ("block-read.sh", block_read),
-        ("token-monitor.py", token_monitor),
-    ];
-
-    for (name, content) in scripts {
-        let path = hooks_dir.join(name);
-        std::fs::write(&path, content).with_context(|| format!("Failed to write {}", name))?;
-        #[cfg(unix)]
-        {
-            let mut perms = std::fs::metadata(&path)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms)?;
-        }
-        println!("  wrote .claude/hooks/{}", name);
-    }
-
-    // --- settings.json ---
-    let settings_path = PathBuf::from(".claude/settings.json");
-    let marker = "semantic:claude-setup";
-
-    if settings_path.exists() {
-        let existing = std::fs::read_to_string(&settings_path)?;
-        if existing.contains(marker) {
-            println!("settings.json already configured — nothing to do.");
-        } else {
-            println!(
-                "settings.json exists but was not written by semantic — leaving it unchanged."
-            );
-            println!("Manually merge the hooks from .claude/hooks/ into your settings.json.");
-        }
-    } else {
-        let settings = format!(
-            r#"{{
-  "_comment": "{}",
-  "hooks": {{
-    "PreToolUse": [
-      {{
-        "matcher": "Grep",
-        "hooks": [{{ "type": "command", "command": ".claude/hooks/block-grep.sh" }}]
-      }},
-      {{
-        "matcher": "Bash",
-        "hooks": [{{ "type": "command", "command": ".claude/hooks/block-bash-grep.sh" }}]
-      }},
-      {{
-        "matcher": "Read",
-        "hooks": [{{ "type": "command", "command": ".claude/hooks/block-read.sh" }}]
-      }}
-    ],
-    "PostToolUse": [
-      {{
-        "matcher": ".*",
-        "hooks": [{{ "type": "command", "command": ".claude/hooks/token-monitor.py" }}]
-      }}
-    ]
-  }}
-}}
-"#,
-            marker
-        );
-        std::fs::write(&settings_path, settings)?;
-        println!("  wrote .claude/settings.json");
-    }
-
-    // --- CLAUDE.md ---
-    agentic_setup()?;
-
-    println!("\nDone. Claude Code will now:");
-    println!("  • block grep, rg, git grep — redirect to git-semantic grep");
-    println!("  • block whole-file reads — redirect to git-semantic grep");
-    println!("  • warn when token usage grows 5x+ from session baseline");
+    std::fs::write(&agent_path, agent_content)?;
+    println!("wrote .claude/agents/git-semantic.md");
+    println!("\nCall with @git-semantic when you need to navigate or search code.");
     Ok(())
 }
 
