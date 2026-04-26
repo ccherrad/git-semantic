@@ -111,11 +111,11 @@ git-semantic grep "error propagation across async boundaries" -n 5
 
 ### `git-semantic enable claude`
 
-Sets up the project for use with Claude Code.
+Installs a Claude Code subagent at `.claude/agents/git-semantic.md`.
 
-- Injects `CLAUDE.md` with mandatory navigation rules (map → get → grep, in that order)
-- Installs `PreToolUse` hooks that block grep/rg and whole-file reads
-- Wires hooks into `.claude/settings.json`
+- The agent auto-invokes when Claude needs to navigate or search code
+- Can also be called explicitly with `@git-semantic`
+- No hooks, no blocked tools — the agent opts into the workflow only when relevant
 - Idempotent — safe to run multiple times
 
 ```bash
@@ -160,7 +160,9 @@ git-semantic config provider onnx
 
 ## Agent workflow
 
-With `git-semantic enable claude` active, the agent follows this workflow:
+After running `git-semantic enable claude`, Claude Code gains a `@git-semantic` subagent. Call it explicitly or let Claude invoke it automatically when it needs to navigate code.
+
+The agent follows this workflow:
 
 **Step 1 — orient**
 ```bash
@@ -180,7 +182,7 @@ git-semantic grep "natural language query"
 ```
 Only if the map was genuinely insufficient.
 
-This discipline — orient once, retrieve directly, never re-search what the map already answered — is what keeps the waste ratio near 1.0x.
+Outside the agent, normal tools work freely. The navigation discipline applies only when the agent is active — orient once, retrieve directly, never re-search what the map already answered.
 
 ---
 
