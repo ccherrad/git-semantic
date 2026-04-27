@@ -20,6 +20,7 @@ impl Database {
         let dim = embedding_dim.unwrap_or(match config.provider {
             crate::embed::EmbeddingProviderType::OpenAI => 1536,
             crate::embed::EmbeddingProviderType::Onnx => config.onnx.embedding_dim,
+            crate::embed::EmbeddingProviderType::Gemma => config.gemma.embedding_dim,
         });
 
         unsafe {
