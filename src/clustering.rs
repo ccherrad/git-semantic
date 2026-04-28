@@ -63,7 +63,7 @@ where
             .unwrap();
 
         let dir = file_dir(&centroid_file.file);
-        let description = build_description(&dir, centroid_file);
+        let description = build_description(&dir, centroid_file, group_files);
         let description_embedding = description_embedder(&description)?;
 
         let mut sorted_files: Vec<&&FileUnit> = group_files.iter().collect();
@@ -240,25 +240,40 @@ fn group_by_directory(file_units: Vec<FileUnit>) -> Vec<DirGroup> {
     groups
 }
 
-fn build_description(dir: &str, centroid_file: &FileUnit) -> String {
+fn build_description(dir: &str, centroid_file: &FileUnit, all_files: &[&FileUnit]) -> String {
     let stem = std::path::Path::new(&centroid_file.file)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(&centroid_file.file)
         .to_string();
 
-    let names: Vec<String> = centroid_file
-        .chunks
-        .iter()
-        .filter_map(|c| extract_item_name(&c.text))
-        .take(5)
-        .collect();
-
     let dir_label = if dir == "." {
         stem.clone()
     } else {
         format!("{}/{}", dir, stem)
     };
+
+    // Collect names from centroid file first, then other files
+    let mut names: Vec<String> = centroid_file
+        .chunks
+        .iter()
+        .filter_map(|c| extract_item_name(&c.text))
+        .collect();
+
+    for file in all_files {
+        if file.file == centroid_file.file {
+            continue;
+        }
+        for chunk in &file.chunks {
+            if let Some(name) = extract_item_name(&chunk.text) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+
+    names.truncate(7);
 
     if names.is_empty() {
         dir_label
