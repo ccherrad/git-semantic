@@ -1,6 +1,8 @@
 use crate::map::{ChunkRef, Edge, SemanticMap, Subsystem};
 use crate::semantic_branch::StoredChunk;
 use anyhow::Result;
+use leiden_rs::{GraphDataBuilder, Leiden, LeidenConfig};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 pub struct ClusterInput {
@@ -30,28 +32,28 @@ where
     }
 
     let file_units = aggregate_by_file(inputs);
-    let dir_groups = group_by_directory(file_units);
+    let communities = leiden_cluster(&file_units);
 
-    let mut subsystems = Vec::with_capacity(dir_groups.len());
+    // Build dir_groups structure for edge detection (reuse existing logic)
+    let dir_groups = group_by_directory_refs(&file_units, &communities);
 
-    for group in &dir_groups {
-        let dim = group.files[0].embedding.len();
+    let mut subsystems = Vec::new();
 
-        // centroid = average of all file embeddings in this directory
+    for group_files in &communities {
+        let dim = group_files[0].embedding.len();
+
         let centroid = {
             let mut sum = vec![0.0f32; dim];
-            for f in &group.files {
+            for f in group_files.iter() {
                 for (d, v) in f.embedding.iter().enumerate() {
                     sum[d] += v;
                 }
             }
-            let n = group.files.len() as f32;
+            let n = group_files.len() as f32;
             sum.iter().map(|v| v / n).collect::<Vec<f32>>()
         };
 
-        // centroid file = file closest to directory centroid
-        let centroid_file = group
-            .files
+        let centroid_file = group_files
             .iter()
             .min_by(|a, b| {
                 cosine_distance(&a.embedding, &centroid)
@@ -60,11 +62,11 @@ where
             })
             .unwrap();
 
-        let description = build_description(&group.dir, centroid_file);
+        let dir = file_dir(&centroid_file.file);
+        let description = build_description(&dir, centroid_file);
         let description_embedding = description_embedder(&description)?;
 
-        // sort files by distance to centroid, closest first
-        let mut sorted_files: Vec<&FileUnit> = group.files.iter().collect();
+        let mut sorted_files: Vec<&&FileUnit> = group_files.iter().collect();
         sorted_files.sort_by(|a, b| {
             cosine_distance(&a.embedding, &centroid)
                 .partial_cmp(&cosine_distance(&b.embedding, &centroid))
@@ -82,10 +84,8 @@ where
             }
         }
 
-        let name = slugify(&description);
-
         subsystems.push(Subsystem {
-            name,
+            name: slugify(&description),
             description,
             description_embedding,
             chunks,
@@ -101,6 +101,74 @@ where
         subsystems,
         edges,
     })
+}
+
+fn leiden_cluster(file_units: &[FileUnit]) -> Vec<Vec<&FileUnit>> {
+    let n = file_units.len();
+
+    if n <= 1 {
+        return file_units.iter().map(|f| vec![f]).collect();
+    }
+
+    // Build similarity graph: add edge between files if cosine similarity > threshold
+    // similarity = 1 - cosine_distance, must be positive for leiden-rs
+    const SIMILARITY_THRESHOLD: f32 = 0.35;
+
+    let mut builder = GraphDataBuilder::new(n);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let sim = 1.0 - cosine_distance(&file_units[i].embedding, &file_units[j].embedding);
+            if sim > SIMILARITY_THRESHOLD {
+                // leiden-rs requires f64 weights
+                let _ = builder.add_edge(i, j, sim as f64);
+            }
+        }
+    }
+
+    let graph = match builder.build() {
+        Ok(g) => g,
+        Err(_) => return file_units.iter().map(|f| vec![f]).collect(),
+    };
+
+    let config = LeidenConfig {
+        seed: Some(42),
+        ..Default::default()
+    };
+
+    let partition = match Leiden::new(config).run(&graph) {
+        Ok(result) => result.partition,
+        Err(_) => return file_units.iter().map(|f| vec![f]).collect(),
+    };
+
+    // Group file_units by community id
+    let mut community_map: HashMap<usize, Vec<&FileUnit>> = HashMap::new();
+    for (node_idx, file_unit) in file_units.iter().enumerate() {
+        let community = partition.community_of(node_idx);
+        community_map.entry(community).or_default().push(file_unit);
+    }
+
+    let mut communities: Vec<Vec<&FileUnit>> = community_map.into_values().collect();
+    communities.sort_by_key(|b| Reverse(b.len()));
+    communities
+}
+
+// Adapter: convert community groups into DirGroup structure for edge building
+fn group_by_directory_refs<'a>(
+    file_units: &'a [FileUnit],
+    _communities: &[Vec<&'a FileUnit>],
+) -> Vec<DirGroup> {
+    group_by_directory(
+        file_units
+            .iter()
+            .map(|f| FileUnit {
+                file: f.file.clone(),
+                embedding: f.embedding.clone(),
+                chunks: f.chunks.clone(),
+                defined: f.defined.clone(),
+                referenced: f.referenced.clone(),
+            })
+            .collect(),
+    )
 }
 
 fn file_dir(file: &str) -> String {

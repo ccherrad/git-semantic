@@ -117,13 +117,20 @@ impl Database {
         )
         .context("Failed to create edges table")?;
 
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks
+             USING fts5(file_path UNINDEXED, start_line UNINDEXED, end_line UNINDEXED, content, content=code_chunks, content_rowid=id);",
+        )
+        .context("Failed to create fts_chunks table")?;
+
         Ok(Database { conn })
     }
 
     pub fn clear(&self) -> Result<()> {
         self.conn
             .execute_batch(
-                "DELETE FROM vec_metadata;
+                "DELETE FROM fts_chunks;
+                 DELETE FROM vec_metadata;
                  DELETE FROM vec_chunks;
                  DELETE FROM code_chunks;
                  DELETE FROM subsystems;
@@ -317,6 +324,20 @@ impl Database {
             )
             .context("Failed to insert metadata")?;
 
+        self.conn
+            .execute(
+                "INSERT INTO fts_chunks (rowid, file_path, start_line, end_line, content)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    chunk_id,
+                    &chunk.file_path,
+                    chunk.start_line,
+                    chunk.end_line,
+                    &chunk.content,
+                ],
+            )
+            .context("Failed to insert into fts_chunks")?;
+
         Ok(())
     }
 
@@ -405,6 +426,75 @@ impl Database {
             embedding: chunks.into_iter().next().unwrap().embedding,
             distance: None,
         }))
+    }
+
+    pub fn search_bm25(&self, query: &str, limit: i64) -> Result<Vec<CodeChunk>> {
+        let escaped = query.replace('"', "\"\"");
+        let fts_query = format!("\"{}\"", escaped);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT c.file_path, c.start_line, c.end_line, c.content, c.embedding,
+                    bm25(fts_chunks) AS score
+             FROM fts_chunks
+             JOIN code_chunks c ON fts_chunks.rowid = c.id
+             WHERE fts_chunks MATCH ?1
+             ORDER BY score
+             LIMIT ?2",
+        )?;
+
+        let chunks = stmt
+            .query_map(params![fts_query, limit], |row| {
+                let embedding_blob: Vec<u8> = row.get(4)?;
+                let embedding: Vec<f32> = bincode::deserialize(&embedding_blob)
+                    .map_err(|_e| rusqlite::Error::InvalidQuery)?;
+                Ok(CodeChunk {
+                    file_path: row.get(0)?,
+                    start_line: row.get(1)?,
+                    end_line: row.get(2)?,
+                    content: row.get(3)?,
+                    embedding,
+                    distance: row.get::<_, Option<f64>>(5)?.map(|s| s as f32),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(chunks)
+    }
+
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        query_embedding: &[f32],
+        limit: i64,
+    ) -> Result<Vec<CodeChunk>> {
+        let semantic = self.search_similar(query_embedding, limit)?;
+        let bm25 = self.search_bm25(query, limit).unwrap_or_default();
+
+        let key = |c: &CodeChunk| format!("{}:{}-{}", c.file_path, c.start_line, c.end_line);
+
+        let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+
+        for (rank, chunk) in semantic.iter().enumerate() {
+            *scores.entry(key(chunk)).or_insert(0.0) += 1.0 / (60.0 + rank as f32 + 1.0);
+        }
+        for (rank, chunk) in bm25.iter().enumerate() {
+            *scores.entry(key(chunk)).or_insert(0.0) += 1.0 / (60.0 + rank as f32 + 1.0);
+        }
+
+        let mut all: Vec<CodeChunk> = semantic.into_iter().chain(bm25).collect();
+        all.sort_by(|a, b| {
+            let sa = scores.get(&key(a)).copied().unwrap_or(0.0);
+            let sb = scores.get(&key(b)).copied().unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all.dedup_by(|a, b| key(a) == key(b));
+        all.truncate(limit as usize);
+
+        for chunk in &mut all {
+            chunk.distance = scores.get(&key(chunk)).copied();
+        }
+
+        Ok(all)
     }
 
     pub fn search_similar(&self, query_embedding: &[f32], limit: i64) -> Result<Vec<CodeChunk>> {

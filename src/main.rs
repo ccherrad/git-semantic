@@ -449,7 +449,7 @@ fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
         embed::generate_embedding(query).context("Failed to generate query embedding")?;
 
     let results = db
-        .search_similar(&query_embedding, max_count)
+        .search_hybrid(query, &query_embedding, max_count)
         .context("Failed to search database")?;
 
     if results.is_empty() {
@@ -458,14 +458,14 @@ fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
     }
 
     for chunk in results.iter() {
-        let dist = chunk
+        let score = chunk
             .distance
-            .map(|d| format!("{:.3}", d))
+            .map(|d| format!("{:.4}", d))
             .unwrap_or_else(|| "N/A".to_string());
 
         println!(
             "[{}] {}:{}-{}",
-            dist, chunk.file_path, chunk.start_line, chunk.end_line
+            score, chunk.file_path, chunk.start_line, chunk.end_line
         );
         println!("{}", chunk.content);
         println!("---");
