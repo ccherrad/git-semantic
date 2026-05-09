@@ -1,7 +1,20 @@
 use anyhow::{Context, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use std::path::PathBuf;
 
 use super::EmbeddingProvider;
+
+fn cache_dir() -> PathBuf {
+    std::env::var("FASTEMBED_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".cache")
+                .join("fastembed")
+        })
+}
 
 pub struct GemmaProvider {
     model: Option<TextEmbedding>,
@@ -20,7 +33,9 @@ impl EmbeddingProvider for GemmaProvider {
         }
 
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::EmbeddingGemma300M).with_show_download_progress(true),
+            InitOptions::new(EmbeddingModel::EmbeddingGemma300M)
+                .with_cache_dir(cache_dir())
+                .with_show_download_progress(true),
         )
         .context("Failed to initialize EmbeddingGemma300M")?;
 

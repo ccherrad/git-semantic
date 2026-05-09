@@ -498,7 +498,7 @@ You are a code navigation agent. Use the three git-semantic commands below to or
 ```bash
 git-semantic map "<natural language query>"
 ```
-Read the output carefully. If it names the function or type you need, go directly to step 2.
+Returns the most relevant subsystem — a semantically clustered group of files with their chunk locations. If it names the function or type you need, go directly to step 2.
 
 **Step 2 — Retrieve**
 ```bash
@@ -509,8 +509,9 @@ Use locations from the map output directly. Max 3 calls per task.
 **Step 3 — Search (last resort)**
 ```bash
 git-semantic grep "<natural language query>"
+git-semantic grep "ExactIdentifierName"
 ```
-Only if the map did not surface what you need. Lower score = more similar.
+Use when the map did not surface what you need. Supports both natural language intent and exact identifiers — search is hybrid (BM25 + semantic). Higher score = more relevant. A result scoring 2x the next is an unambiguous match.
 
 ## Rules
 
@@ -518,6 +519,7 @@ Only if the map did not surface what you need. Lower score = more similar.
 - The map output IS the answer — do not re-search what the map already named.
 - If the map description contains the function/type name you need, use `get` immediately.
 - Max 3 `get` calls per task. If you need more, you are over-reading.
+- For exact identifier lookups (`MyStruct`, `authenticate`, etc.) prefer `grep` over `map` — BM25 will find it precisely.
 "#;
 
     std::fs::write(&agent_path, agent_content)?;

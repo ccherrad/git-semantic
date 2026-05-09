@@ -68,7 +68,7 @@ pub struct ONNXConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            provider: EmbeddingProviderType::Onnx,
+            provider: EmbeddingProviderType::Gemma,
             openai: OpenAIConfig::default(),
             onnx: ONNXConfig::default(),
             gemma: GemmaConfig::default(),
@@ -150,7 +150,7 @@ impl EmbeddingConfig {
     pub fn load_or_default() -> Result<Self> {
         let provider_str = Self::get_git_config("semantic.provider")
             .or_else(|| std::env::var("SEMANTIC_PROVIDER").ok())
-            .unwrap_or_else(|| "onnx".to_string());
+            .unwrap_or_else(|| "gemma".to_string());
 
         let provider = provider_str.parse()?;
 
