@@ -50,11 +50,8 @@ enum Commands {
         max_count: i64,
     },
 
-    #[command(about = "Enable a coding agent for this project (e.g. claude)")]
-    Enable {
-        #[arg(help = "Agent to enable: claude")]
-        agent: String,
-    },
+    #[command(about = "Start the MCP server (JSON-RPC over stdio)")]
+    Mcp,
 
     #[command(about = "Show token usage for the current project's Claude Code sessions")]
     Usage {
@@ -142,10 +139,9 @@ fn main() -> Result<()> {
         Commands::Get { location, mode } => {
             get_command(&location, mode.as_deref())?;
         }
-        Commands::Enable { agent } => match agent.as_str() {
-            "claude" => claude_setup()?,
-            other => anyhow::bail!("Unknown agent '{}'. Supported: claude", other),
-        },
+        Commands::Mcp => {
+            mcp_serve()?;
+        }
         Commands::Usage { sessions, watch } => {
             if let Some(interval) = watch {
                 let secs = if interval == 0 { 2 } else { interval };
@@ -500,58 +496,381 @@ fn grep_semantic(query: &str, max_count: i64) -> Result<()> {
     Ok(())
 }
 
-fn claude_setup() -> Result<()> {
-    let agents_dir = PathBuf::from(".claude/agents");
-    std::fs::create_dir_all(&agents_dir).context("Failed to create .claude/agents")?;
+fn mcp_serve() -> Result<()> {
+    use std::io::{BufRead, Write};
 
-    let agent_path = agents_dir.join("git-semantic.md");
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
 
-    if agent_path.exists() {
-        println!(".claude/agents/git-semantic.md already exists — nothing to do.");
-        return Ok(());
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) if l.trim().is_empty() => continue,
+            Ok(l) => l,
+            Err(_) => break,
+        };
+
+        let req: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let method = req["method"].as_str().unwrap_or("");
+
+        let response = match method {
+            "initialize" => mcp_ok(
+                id,
+                serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "git-semantic", "version": env!("CARGO_PKG_VERSION") }
+                }),
+            ),
+            "notifications/initialized" => continue,
+            "tools/list" => mcp_ok(
+                id,
+                serde_json::json!({
+                    "tools": [
+                        {
+                            "name": "map",
+                            "description": "Orient in the codebase. Returns the most relevant subsystem — semantically clustered files with chunk locations and call edges. Use this first.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "query": { "type": "string", "description": "Natural language description of what you are looking for. Omit to list all subsystems." }
+                                }
+                            }
+                        },
+                        {
+                            "name": "get",
+                            "description": "Retrieve a file or exact chunk. Use --mode outline (~96% token reduction) to read cheaply, signatures (~86%) for declarations, or omit for full content. Use file:start-end for an exact chunk.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "location": { "type": "string", "description": "File path (e.g. src/db.rs) or chunk location (e.g. src/db.rs:12-34)" },
+                                    "mode": { "type": "string", "enum": ["outline", "signatures", "full"], "description": "Output mode. Default: full." }
+                                },
+                                "required": ["location"]
+                            }
+                        },
+                        {
+                            "name": "grep",
+                            "description": "Search code using hybrid BM25 + semantic + graph proximity search. Use when map did not surface what you need, or for exact identifier lookups.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "query": { "type": "string", "description": "Natural language query or exact identifier" },
+                                    "n": { "type": "integer", "description": "Maximum results. Default: 10." }
+                                },
+                                "required": ["query"]
+                            }
+                        },
+                        {
+                            "name": "health",
+                            "description": "Show cohesion and coupling heatmap of semantic communities.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "community": { "type": "string", "description": "Partial name to drill into a specific community." }
+                                }
+                            }
+                        }
+                    ]
+                }),
+            ),
+            "tools/call" => {
+                let name = req["params"]["name"].as_str().unwrap_or("");
+                let args = &req["params"]["arguments"];
+                match mcp_dispatch(name, args) {
+                    Ok(text) => mcp_ok(
+                        id,
+                        serde_json::json!({
+                            "content": [{ "type": "text", "text": text }]
+                        }),
+                    ),
+                    Err(e) => mcp_err(id, -32000, &e.to_string()),
+                }
+            }
+            _ => mcp_err(id, -32601, "method not found"),
+        };
+
+        writeln!(out, "{}", serde_json::to_string(&response)?)?;
+        out.flush()?;
     }
 
-    let agent_content = r#"---
-name: git-semantic
-description: Use this agent when searching, navigating, or understanding code in this repository. Invoke it when you need to find where something is implemented, understand how a subsystem works, locate a function or type, or explore code before making changes.
----
-
-You are a code navigation agent. Use the three git-semantic commands below to orient and retrieve code. Do not load whole files or use grep.
-
-## Workflow
-
-**Step 1 — Orient**
-```bash
-git-semantic map "<natural language query>"
-```
-Returns the most relevant subsystem — a semantically clustered group of files with their chunk locations. If it names the function or type you need, go directly to step 2.
-
-**Step 2 — Retrieve**
-```bash
-git-semantic get <file:start-end>
-```
-Use locations from the map output directly. Max 3 calls per task.
-
-**Step 3 — Search (last resort)**
-```bash
-git-semantic grep "<natural language query>"
-git-semantic grep "ExactIdentifierName"
-```
-Use when the map did not surface what you need. Supports both natural language intent and exact identifiers — search is hybrid (BM25 + semantic). Higher score = more relevant. A result scoring 2x the next is an unambiguous match.
-
-## Rules
-
-- Never re-fetch a chunk already in context.
-- The map output IS the answer — do not re-search what the map already named.
-- If the map description contains the function/type name you need, use `get` immediately.
-- Max 3 `get` calls per task. If you need more, you are over-reading.
-- For exact identifier lookups (`MyStruct`, `authenticate`, etc.) prefer `grep` over `map` — BM25 will find it precisely.
-"#;
-
-    std::fs::write(&agent_path, agent_content)?;
-    println!("wrote .claude/agents/git-semantic.md");
-    println!("\nCall with @git-semantic when you need to navigate or search code.");
     Ok(())
+}
+
+fn mcp_ok(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn mcp_err(id: serde_json::Value, code: i32, msg: &str) -> serde_json::Value {
+    serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": msg } })
+}
+
+fn mcp_dispatch(name: &str, args: &serde_json::Value) -> Result<String> {
+    match name {
+        "map" => {
+            let query = args["query"].as_str();
+            mcp_map(query)
+        }
+        "get" => {
+            let location = args["location"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: location"))?;
+            let mode = args["mode"].as_str();
+            mcp_get(location, mode)
+        }
+        "grep" => {
+            let query = args["query"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: query"))?;
+            let n = args["n"].as_i64().unwrap_or(10);
+            mcp_grep(query, n)
+        }
+        "health" => {
+            let community = args["community"].as_str();
+            mcp_health(community)
+        }
+        _ => anyhow::bail!("unknown tool: {}", name),
+    }
+}
+
+fn mcp_map(query: Option<&str>) -> Result<String> {
+    let db = db::Database::init()?;
+    let mut out = String::new();
+
+    match query {
+        None => {
+            let subsystems = db.all_subsystems()?;
+            if subsystems.is_empty() {
+                return Ok(
+                    "Semantic map is empty. Run `git-semantic index` then `git-semantic hydrate`."
+                        .into(),
+                );
+            }
+            for subsystem in &subsystems {
+                let files: Vec<&str> = subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+                let edges = db.edges_into(&files)?;
+                out.push_str(&format_subsystem(subsystem, &edges));
+            }
+        }
+        Some(q) => {
+            let embedding = embed::generate_embedding(q)?;
+            match db.query_map(&embedding)? {
+                None => return Ok(
+                    "Semantic map is empty. Run `git-semantic index` then `git-semantic hydrate`."
+                        .into(),
+                ),
+                Some(subsystem) => {
+                    let files: Vec<&str> =
+                        subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+                    let edges = db.edges_into(&files)?;
+                    out.push_str(&format_subsystem(&subsystem, &edges));
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn format_subsystem(subsystem: &map::Subsystem, edges: &[map::Edge]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "## {} — {}\n",
+        subsystem.name, subsystem.description
+    ));
+
+    let subsystem_files: std::collections::HashSet<&str> =
+        subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+
+    let mut entry_points: Vec<(&str, &[String])> = edges
+        .iter()
+        .filter(|e| {
+            subsystem_files.contains(e.to.as_str()) && !subsystem_files.contains(e.from.as_str())
+        })
+        .map(|e| (e.from.as_str(), e.via.as_slice()))
+        .collect();
+    entry_points.sort_by_key(|(f, _)| *f);
+    entry_points.dedup_by_key(|(f, _)| *f);
+
+    if !entry_points.is_empty() {
+        out.push_str("  entry points:\n");
+        for (file, via) in &entry_points {
+            if via.is_empty() {
+                out.push_str(&format!("    {}\n", file));
+            } else {
+                out.push_str(&format!("    {} (via {})\n", file, via.join(", ")));
+            }
+        }
+    }
+
+    for chunk in &subsystem.chunks {
+        out.push_str(&format!("  {}\n", chunk.display()));
+    }
+    out.push('\n');
+    out
+}
+
+fn mcp_get(location: &str, mode: Option<&str>) -> Result<String> {
+    let db = db::Database::init()?;
+    let mut out = String::new();
+
+    if let Some(chunk_ref) = map::ChunkRef::parse(location) {
+        let chunk = db
+            .get_chunk_by_location(
+                &chunk_ref.file,
+                chunk_ref.start_line as i64,
+                chunk_ref.end_line as i64,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No chunks found overlapping {}:{}-{}. Run `git-semantic hydrate` first.",
+                    chunk_ref.file,
+                    chunk_ref.start_line,
+                    chunk_ref.end_line
+                )
+            })?;
+        out.push_str(&format!(
+            "// {}:{}-{}\n",
+            chunk.file_path, chunk.start_line, chunk.end_line
+        ));
+        out.push_str(&chunk.content);
+    } else {
+        let chunks = db.get_chunks_for_file(location)?;
+        if chunks.is_empty() {
+            anyhow::bail!(
+                "No chunks found for '{}'. Run `git-semantic hydrate` first.",
+                location
+            );
+        }
+
+        let entry_points = db.edges_for_file(location).unwrap_or_default();
+        out.push_str(&format!("// {}\n", location));
+        if !entry_points.is_empty() {
+            out.push_str("// callers:\n");
+            for e in &entry_points {
+                if e.via.is_empty() {
+                    out.push_str(&format!("//   {}\n", e.from));
+                } else {
+                    out.push_str(&format!("//   {} (via {})\n", e.from, e.via.join(", ")));
+                }
+            }
+            out.push('\n');
+        }
+
+        match mode.unwrap_or("full") {
+            "outline" => {
+                for chunk in &chunks {
+                    let name = chunk_name(chunk, location);
+                    out.push_str(&format!(
+                        "  L{}-{}  {}\n",
+                        chunk.start_line, chunk.end_line, name
+                    ));
+                }
+            }
+            "signatures" => {
+                for chunk in &chunks {
+                    let sig = chunk_signature(chunk, location);
+                    out.push_str(&format!(
+                        "{}  // L{}-{}\n\n",
+                        sig, chunk.start_line, chunk.end_line
+                    ));
+                }
+            }
+            _ => {
+                for chunk in &chunks {
+                    out.push_str(&chunk.content);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn mcp_grep(query: &str, n: i64) -> Result<String> {
+    let db = db::Database::init()?;
+    let embedding = embed::generate_embedding(query)?;
+    let results = db.search_hybrid(query, &embedding, n)?;
+
+    if results.is_empty() {
+        return Ok("No results found. Run `git-semantic hydrate` first.".into());
+    }
+
+    let mut out = String::new();
+    for chunk in &results {
+        let score = chunk
+            .distance
+            .map(|d| format!("{:.4}", d))
+            .unwrap_or_else(|| "N/A".into());
+        out.push_str(&format!(
+            "[{}] {}:{}-{}\n",
+            score, chunk.file_path, chunk.start_line, chunk.end_line
+        ));
+        out.push_str(&chunk.content);
+        out.push_str("\n---\n");
+    }
+    Ok(out)
+}
+
+fn mcp_health(community: Option<&str>) -> Result<String> {
+    let mut out = Vec::new();
+    // Reuse health_command but capture output — delegate to existing logic via process
+    // For now write plain text summary
+    let db = db::Database::init()?;
+    let subsystems = db.all_subsystems()?;
+    if subsystems.is_empty() {
+        return Ok(
+            "No index found. Run `git-semantic index` or `git-semantic hydrate` first.".into(),
+        );
+    }
+    let all_edges = db.all_edges()?;
+
+    for subsystem in &subsystems {
+        let files: Vec<&str> = subsystem
+            .chunks
+            .iter()
+            .map(|c| c.file.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if let Some(filter) = community {
+            if !subsystem
+                .name
+                .to_lowercase()
+                .contains(&filter.to_lowercase())
+            {
+                continue;
+            }
+        }
+
+        let file_set: std::collections::HashSet<&str> = files.iter().copied().collect();
+        let coupling_out = all_edges
+            .iter()
+            .filter(|e| file_set.contains(e.from.as_str()) && !file_set.contains(e.to.as_str()))
+            .count();
+        let fan_in = all_edges
+            .iter()
+            .filter(|e| file_set.contains(e.to.as_str()) && !file_set.contains(e.from.as_str()))
+            .count();
+
+        out.push(format!(
+            "{} — files: {}  chunks: {}  coup-out: {}  fan-in: {}",
+            subsystem.name,
+            files.len(),
+            subsystem.chunks.len(),
+            coupling_out,
+            fan_in
+        ));
+    }
+
+    Ok(out.join("\n"))
 }
 
 fn waste_bar(turns: &[u64], baseline: f64) -> String {
@@ -767,84 +1086,8 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
-fn print_subsystem(subsystem: &map::Subsystem, edges: &[map::Edge]) {
-    println!("## {} — {}", subsystem.name, subsystem.description);
-
-    // Files that belong to this subsystem
-    let subsystem_files: std::collections::HashSet<&str> =
-        subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
-
-    // Entry points: files outside this subsystem that call into it
-    let mut entry_points: Vec<(&str, &[String])> = edges
-        .iter()
-        .filter(|e| {
-            subsystem_files.contains(e.to.as_str()) && !subsystem_files.contains(e.from.as_str())
-        })
-        .map(|e| (e.from.as_str(), e.via.as_slice()))
-        .collect();
-    entry_points.sort_by_key(|(f, _)| *f);
-    entry_points.dedup_by_key(|(f, _)| *f);
-
-    if !entry_points.is_empty() {
-        println!("  entry points:");
-        for (file, via) in &entry_points {
-            if via.is_empty() {
-                println!("    {}", file);
-            } else {
-                println!("    {} (via {})", file, via.join(", "));
-            }
-        }
-    }
-
-    for chunk in &subsystem.chunks {
-        println!("  {}", chunk.display());
-    }
-    println!();
-}
-
 fn map_command(query: Option<&str>) -> Result<()> {
-    let db = db::Database::init().context("Failed to initialize database")?;
-
-    match query {
-        None => {
-            let subsystems = db
-                .all_subsystems()
-                .context("Failed to load subsystems from database")?;
-
-            if subsystems.is_empty() {
-                println!(
-                    "Semantic map is empty. Run `git-semantic index` then `git-semantic hydrate`."
-                );
-                return Ok(());
-            }
-
-            for subsystem in &subsystems {
-                let files: Vec<&str> = subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
-                let edges = db.edges_into(&files).context("Failed to load edges")?;
-                print_subsystem(subsystem, &edges);
-            }
-        }
-        Some(q) => {
-            let query_embedding = embed::generate_embedding(q).context("Failed to embed query")?;
-
-            let subsystem = db
-                .query_map(&query_embedding)
-                .context("Failed to query map")?;
-
-            match subsystem {
-                None => println!(
-                    "Semantic map is empty. Run `git-semantic index` then `git-semantic hydrate`."
-                ),
-                Some(subsystem) => {
-                    let files: Vec<&str> =
-                        subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
-                    let edges = db.edges_into(&files).context("Failed to load edges")?;
-                    print_subsystem(&subsystem, &edges);
-                }
-            }
-        }
-    }
-
+    print!("{}", mcp_map(query)?);
     Ok(())
 }
 

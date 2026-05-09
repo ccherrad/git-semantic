@@ -1,28 +1,56 @@
 # git-semantic
 
-> Semantic search and spatial navigation for Git repositories — so AI coding agents stop searching and start knowing.
+> Semantic search and spatial navigation for Git repositories — so AI coding agents orient in one turn and retrieve exactly what they need.
 
 `git-semantic` parses every tracked file with tree-sitter, generates vector embeddings per chunk, and stores them on a dedicated orphan Git branch. At index time it also builds a **spatial map** of the codebase — grouping files into semantically coherent subsystems using Leiden community detection, labeling them by their key functions, and tracking cross-file call edges.
 
-Search is hybrid: BM25 (SQLite FTS5) + semantic embeddings merged via Reciprocal Rank Fusion. Exact identifier lookups score higher when they appear in both ranked lists; natural language queries fall back gracefully to semantic-only.
-
-The result: an AI coding agent can orient in one turn instead of five, retrieve exactly what it needs instead of everything that matches, and stay efficient across a long session instead of degrading into context bloat.
+Search is hybrid: BM25 (SQLite FTS5) + semantic embeddings + graph proximity, merged via Reciprocal Rank Fusion. Exact identifier lookups score higher when they appear in both ranked lists; files connected via call edges to top results are boosted automatically.
 
 ---
 
-## The problem
+## Motivation
 
-AI coding agents default to exploration. They read files, run searches, accumulate context. By the time they understand the codebase well enough to work, they have already paid for that understanding in tokens — and will keep paying for it on every subsequent turn.
+Good agents don't need to explore — they need to know where to look and how much to read.
 
-We measure this with the **waste ratio**:
+`git-semantic` gives agents a spatial model of the codebase. Instead of searching and accumulating, an agent can orient with `map`, read a file's structure with `get --mode outline` (~96% token reduction), pull the declaration with `--mode signatures` (~86% reduction), and fetch the exact body with `get file:start-end` only when it needs to. A well-structured session stays flat — no context bloat, no waste ratio inflation — because the agent fetches surgically from the start.
 
-```
-waste ratio = avg tokens/turn (last 3 turns) ÷ avg tokens/turn (first 5 turns)
-```
+The index lives on a Git branch. One person indexes, the whole team benefits — no re-embedding, no API keys per developer. The map is shared state: every agent session starts with the same orientation, not a cold rediscovery of the codebase.
 
-1.0x means the session is flat. 2.5x means late turns cost two and a half times the first. Without intervention, agents routinely hit 3-5x on long sessions. The cause is not bad search — it is orientation cost. Every session starts cold and re-discovers the same codebase from scratch.
+`git-semantic benchmark` measures this concretely on your own repo: token savings per language, read mode comparison, and a navigation replay that shows grep precision vs map+outline+get precision across sampled subsystems.
 
-Semantic search alone does not fix this. It improves retrieval quality but does nothing about the turns spent figuring out what to retrieve. The map fixes orientation.
+### Benchmark — [Textual](https://github.com/Textualize/textual) (988 Python files)
+
+**Token savings by read mode**
+
+| mode | tokens | vs raw |
+|------|--------|--------|
+| raw | 1.1M | — |
+| full (chunks) | 1.1M | 4.3% |
+| signatures | 152K | 86.4% |
+| outline | 41K | **96.3%** |
+
+**Session simulation** (10 files navigated, $3/1M tokens)
+
+| scenario | tokens | cost | savings |
+|----------|--------|------|---------|
+| raw (read whole files) | 11K | $0.034 | — |
+| grep only | 8K | $0.024 | 28.8% |
+| map + outline + get | 3K | $0.009 | **72.3%** |
+| map + signatures + get | 4K | $0.013 | 62.4% |
+
+**Navigation comparison** (10 sampled subsystem queries)
+
+| strategy | avg tokens/query | precision |
+|----------|-----------------|-----------|
+| grep only (top 5) | 377 | 40% |
+| map + outline + get | 2K | **100%** |
+| map + signatures + get | 2K | **100%** |
+
+Precision = top result belongs to the correct subsystem.
+
+The session simulation assumes one query, fixed chunk count. Real agents don't work that way — Claude Code reads however many results look relevant (typically 2-3, sometimes more) and retries if nothing fits. The token numbers are a lower bound, not the full picture.
+
+What the simulation doesn't capture: at 40% precision, 6 in 10 grep queries land in the wrong subsystem. The agent reads wrong chunks, backtracks, searches again — each retry compounds context. map + outline always lands on the first try, so the end-to-end cost is lower even though the per-query token count is higher. Precision is the metric that matters; the token counts are illustrative.
 
 ---
 
@@ -165,17 +193,38 @@ Output includes:
 - Session cost simulation
 - Navigation comparison: grep precision vs map+outline+get precision across sampled subsystems
 
-### `git-semantic enable claude`
+### `git-semantic mcp`
 
-Installs a Claude Code subagent at `.claude/agents/git-semantic.md`.
-
-- The agent auto-invokes when Claude needs to navigate or search code
-- Can also be called explicitly with `@git-semantic`
-- No hooks, no blocked tools — the agent opts into the workflow only when relevant
-- Idempotent — safe to run multiple times
+Starts the MCP server (JSON-RPC over stdio). Exposes `map`, `get`, `grep`, and `health` as tools to any MCP-compatible client — Claude Code, Cursor, Codex, Windsurf, and others.
 
 ```bash
-git-semantic enable claude
+git-semantic mcp
+```
+
+Register it in your client's config:
+
+**Claude Code** (`.claude/settings.json`):
+```json
+{
+  "mcpServers": {
+    "git-semantic": {
+      "command": "git-semantic",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Cursor** (`.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "git-semantic": {
+      "command": "git-semantic",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
 ### `git-semantic usage`
@@ -209,17 +258,14 @@ Configure the embedding provider. Stored in `.git/config`, per-repository.
 ```bash
 git-semantic config --list
 git-semantic config provider openai
-git-semantic config provider onnx
 git-semantic config provider gemma
 ```
 
 ---
 
-## Agent workflow
+## Navigation workflow
 
-After running `git-semantic enable claude`, Claude Code gains a `@git-semantic` subagent. Call it explicitly or let Claude invoke it automatically when it needs to navigate code.
-
-The agent follows this workflow:
+Once registered as an MCP server, any client can call the tools directly. The intended workflow:
 
 **Step 1 — orient**
 ```bash
@@ -247,7 +293,7 @@ git-semantic grep "ExactIdentifierName"
 ```
 Use when the map was genuinely insufficient. Search is hybrid (BM25 + semantic + graph proximity). For exact identifier lookups prefer `grep` over `map` — BM25 will find it precisely.
 
-Outside the agent, normal tools work freely. The navigation discipline applies only when the agent is active — orient once, read cheaply, retrieve exactly, never re-search what the map already answered.
+Orient once, read cheaply, retrieve exactly, never re-search what the map already answered.
 
 ---
 
@@ -317,21 +363,12 @@ export OPENAI_API_KEY="sk-..."
 git-semantic config provider openai
 ```
 
-### Local ONNX embeddings (no API key required)
-
-```bash
-git-semantic config provider onnx
-git-semantic config onnx.modelPath /path/to/model.onnx
-```
-
 ### Available keys
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `provider` | `gemma` | Embedding provider: `gemma`, `openai`, or `onnx` |
+| `provider` | `gemma` | Embedding provider: `gemma` or `openai` |
 | `openai.model` | `text-embedding-3-small` | OpenAI model |
-| `onnx.modelPath` | — | Path to local ONNX model file |
-| `onnx.modelName` | `bge-small-en-v1.5` | ONNX model name |
 | `gemma.embeddingDim` | `768` | Gemma embedding dimension |
 
 ---
