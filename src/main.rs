@@ -53,19 +53,6 @@ enum Commands {
     #[command(about = "Start the MCP server (JSON-RPC over stdio)")]
     Mcp,
 
-    #[command(about = "Show token usage for the current project's Claude Code sessions")]
-    Usage {
-        #[arg(short, long, help = "Number of sessions to show", default_value = "5")]
-        sessions: usize,
-        #[arg(
-            short,
-            long,
-            help = "Watch mode: refresh every N seconds",
-            value_name = "SECS"
-        )]
-        watch: Option<u64>,
-    },
-
     #[command(about = "Show the codebase map or find subsystems matching a query")]
     Map {
         #[arg(help = "Natural language query to find matching subsystems (optional)")]
@@ -141,19 +128,6 @@ fn main() -> Result<()> {
         }
         Commands::Mcp => {
             mcp_serve()?;
-        }
-        Commands::Usage { sessions, watch } => {
-            if let Some(interval) = watch {
-                let secs = if interval == 0 { 2 } else { interval };
-                loop {
-                    print!("\x1B[2J\x1B[H");
-                    show_usage(sessions)?;
-                    println!("\nRefreshing every {}s — Ctrl+C to stop", secs);
-                    std::thread::sleep(std::time::Duration::from_secs(secs));
-                }
-            } else {
-                show_usage(sessions)?;
-            }
         }
         Commands::Benchmark { json } => {
             benchmark_command(json)?;
@@ -568,14 +542,14 @@ fn mcp_serve() -> Result<()> {
                         },
                         {
                             "name": "health",
-                            "description": "Show cohesion and coupling heatmap of semantic communities.",
+                            "description": "Show coupling and fan-in metrics for each subsystem. Optionally filter by subsystem name.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "community": { "type": "string", "description": "Partial name to drill into a specific community." }
+                                    "community": { "type": "string", "description": "Filter to subsystems whose name contains this string (case-insensitive). Omit for all." }
                                 }
                             }
-                        }
+                        },
                     ]
                 }),
             ),
@@ -871,219 +845,6 @@ fn mcp_health(community: Option<&str>) -> Result<String> {
     }
 
     Ok(out.join("\n"))
-}
-
-fn waste_bar(turns: &[u64], baseline: f64) -> String {
-    let blocks = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-    let max = *turns.iter().max().unwrap_or(&1) as f64;
-    turns
-        .iter()
-        .enumerate()
-        .map(|(i, &t)| {
-            let height = ((t as f64 / max) * 7.0).round() as usize;
-            let bar = blocks[height.min(7)];
-            if i < 5 {
-                bar.to_string()
-            } else {
-                let ratio = t as f64 / baseline;
-                if ratio >= 5.0 {
-                    format!("\x1B[31m{}\x1B[0m", bar)
-                } else if ratio >= 2.5 {
-                    format!("\x1B[33m{}\x1B[0m", bar)
-                } else {
-                    bar.to_string()
-                }
-            }
-        })
-        .collect()
-}
-
-fn show_usage(max_sessions: usize) -> Result<()> {
-    let projects_dir = dirs_home()?.join(".claude").join("projects");
-    if !projects_dir.exists() {
-        println!(
-            "No Claude Code sessions found at {}",
-            projects_dir.display()
-        );
-        return Ok(());
-    }
-
-    let cwd = std::env::current_dir()?;
-    let cwd_key = cwd.to_string_lossy().replace('/', "-");
-
-    let project_dir = std::fs::read_dir(&projects_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .find(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .contains(cwd_key.trim_start_matches('-'))
-        });
-
-    let project_dir = match project_dir {
-        Some(d) => d.path(),
-        None => {
-            println!("No sessions found for current project ({}).", cwd.display());
-            return Ok(());
-        }
-    };
-
-    let mut all_sessions: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-
-    for session_entry in std::fs::read_dir(&project_dir)? {
-        let session_entry = session_entry?;
-        let path = session_entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-            let mtime = session_entry.metadata()?.modified()?;
-            all_sessions.push((mtime, path));
-        }
-    }
-
-    all_sessions.sort_by(|a, b| b.0.cmp(&a.0));
-
-    if all_sessions.is_empty() {
-        println!("No sessions found.");
-        return Ok(());
-    }
-
-    println!("Project: {}", cwd.display());
-    println!();
-    println!(
-        "{:<14} {:<8} {:<12} {:<12} {:<10} {:<10} GROWTH",
-        "SESSION", "TURNS", "BASELINE", "LATEST", "WASTE", "TOTAL"
-    );
-    println!("{}", "-".repeat(80));
-
-    let mut first = true;
-    let mut hottest: Option<(usize, u64, f64)> = None;
-
-    for (_, path) in all_sessions.iter().take(max_sessions) {
-        let session_id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-
-        let turns = parse_session_turns(path.to_path_buf());
-        if turns.is_empty() {
-            continue;
-        }
-
-        let baseline = turns[..5.min(turns.len())].iter().sum::<u64>() as f64
-            / 5.0_f64.min(turns.len() as f64);
-        let latest = turns[turns.len().saturating_sub(3)..].iter().sum::<u64>() as f64
-            / 3.0_f64.min(turns.len() as f64);
-        let total: u64 = turns.iter().sum();
-        let waste = if baseline > 0.0 {
-            latest / baseline
-        } else {
-            1.0
-        };
-
-        let waste_str = if waste >= 10.0 {
-            format!("\x1B[31m{:.0}x !!!\x1B[0m", waste)
-        } else if waste >= 5.0 {
-            format!("\x1B[31m{:.0}x !\x1B[0m", waste)
-        } else if waste >= 2.5 {
-            format!("\x1B[33m{:.1}x\x1B[0m", waste)
-        } else {
-            format!("{:.1}x", waste)
-        };
-
-        let bar = waste_bar(&turns, baseline);
-
-        let waste_pad = if waste_str.contains('\x1B') {
-            18 + 9
-        } else {
-            10
-        };
-        println!(
-            "{:<14} {:<8} {:<12} {:<12} {:<waste_pad$} {:<10} {}",
-            &session_id[..14.min(session_id.len())],
-            turns.len(),
-            format_tokens(baseline as u64),
-            format_tokens(latest as u64),
-            waste_str,
-            format_tokens(total),
-            bar,
-            waste_pad = waste_pad,
-        );
-
-        if first {
-            if let Some((spike_turn, spike_val)) =
-                turns.iter().enumerate().skip(5).max_by_key(|(_, &v)| v)
-            {
-                hottest = Some((spike_turn + 1, *spike_val, baseline));
-            }
-            first = false;
-        }
-    }
-
-    println!();
-    println!("BASELINE = avg tokens/turn for first 5 turns");
-    println!("LATEST   = avg tokens/turn for last 3 turns");
-    println!("WASTE    = LATEST / BASELINE  (1x = healthy, 10x+ = start fresh)");
-    println!("TOTAL    = total tokens consumed in session");
-    println!("GROWTH   = sparkline per turn  \x1B[33m(yellow = 2.5x+)\x1B[0m  \x1B[31m(red = 5x+)\x1B[0m  first 5 turns = baseline");
-
-    if let Some((turn, val, base)) = hottest {
-        println!();
-        println!(
-            "Biggest spike (most recent session): turn {} — {} ({:.1}x baseline)",
-            turn,
-            format_tokens(val),
-            val as f64 / base
-        );
-        println!("  Why: context accumulation — each turn re-sends all prior tool results.");
-        println!("  Fix: start fresh session, or use git-semantic map+get instead of grep.");
-    }
-
-    Ok(())
-}
-
-fn parse_session_turns(path: PathBuf) -> Vec<u64> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-    let mut turns = Vec::new();
-    for line in content.lines() {
-        if let Ok(r) = serde_json::from_str::<serde_json::Value>(line) {
-            if r.get("type").and_then(|t| t.as_str()) == Some("assistant") {
-                if let Some(usage) = r.pointer("/message/usage") {
-                    let total = usage
-                        .get("input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0)
-                        + usage
-                            .get("output_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0)
-                        + usage
-                            .get("cache_creation_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0)
-                        + usage
-                            .get("cache_read_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                    if total > 0 {
-                        turns.push(total);
-                    }
-                }
-            }
-        }
-    }
-    turns
-}
-
-fn format_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.0}k", n as f64 / 1_000.0)
-    } else {
-        format!("{}", n)
-    }
 }
 
 fn map_command(query: Option<&str>) -> Result<()> {
@@ -2241,12 +2002,6 @@ fn run_navigation_benchmark(
     );
 
     Ok(())
-}
-
-fn dirs_home() -> Result<PathBuf> {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .context("HOME environment variable not set")
 }
 
 fn to_git_key(key: &str) -> String {

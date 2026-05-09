@@ -12,45 +12,13 @@ Search is hybrid: BM25 (SQLite FTS5) + semantic embeddings + graph proximity, me
 
 Good agents don't need to explore — they need to know where to look and how much to read.
 
-`git-semantic` gives agents a spatial model of the codebase. Instead of searching and accumulating, an agent can orient with `map`, read a file's structure with `get --mode outline` (~96% token reduction), pull the declaration with `--mode signatures` (~86% reduction), and fetch the exact body with `get file:start-end` only when it needs to. A well-structured session stays flat — no context bloat, no waste ratio inflation — because the agent fetches surgically from the start.
+`git-semantic` gives agents a spatial model of the codebase. Instead of searching and accumulating, an agent can orient with `map`, read a file's structure with `get --mode outline` (~96% token reduction), pull the declaration with `--mode signatures` (~86% reduction), and fetch the exact body with `get file:start-end` only when it needs to. A well-structured session stays flat because the agent fetches surgically from the start rather than accumulating everything that matched.
 
 The index lives on a Git branch. One person indexes, the whole team benefits — no re-embedding, no API keys per developer. The map is shared state: every agent session starts with the same orientation, not a cold rediscovery of the codebase.
 
 `git-semantic benchmark` measures this concretely on your own repo: token savings per language, read mode comparison, and a navigation replay that shows grep precision vs map+outline+get precision across sampled subsystems.
 
-### Benchmark — [Textual](https://github.com/Textualize/textual) (988 Python files)
-
-**Token savings by read mode**
-
-| mode | tokens | vs raw |
-|------|--------|--------|
-| raw | 1.1M | — |
-| full (chunks) | 1.1M | 4.3% |
-| signatures | 152K | 86.4% |
-| outline | 41K | **96.3%** |
-
-**Session simulation** (10 files navigated, $3/1M tokens)
-
-| scenario | tokens | cost | savings |
-|----------|--------|------|---------|
-| raw (read whole files) | 11K | $0.034 | — |
-| grep only | 8K | $0.024 | 28.8% |
-| map + outline + get | 3K | $0.009 | **72.3%** |
-| map + signatures + get | 4K | $0.013 | 62.4% |
-
-**Navigation comparison** (10 sampled subsystem queries)
-
-| strategy | avg tokens/query | precision |
-|----------|-----------------|-----------|
-| grep only (top 5) | 377 | 40% |
-| map + outline + get | 2K | **100%** |
-| map + signatures + get | 2K | **100%** |
-
-Precision = top result belongs to the correct subsystem.
-
-The session simulation assumes one query, fixed chunk count. Real agents don't work that way — Claude Code reads however many results look relevant (typically 2-3, sometimes more) and retries if nothing fits. The token numbers are a lower bound, not the full picture.
-
-What the simulation doesn't capture: at 40% precision, 6 in 10 grep queries land in the wrong subsystem. The agent reads wrong chunks, backtracks, searches again — each retry compounds context. map + outline always lands on the first try, so the end-to-end cost is lower even though the per-query token count is higher. Precision is the metric that matters; the token counts are illustrative.
+See [BENCHMARKS.md](BENCHMARKS.md) for results on real codebases.
 
 ---
 
@@ -226,30 +194,6 @@ Register it in your client's config:
   }
 }
 ```
-
-### `git-semantic usage`
-
-Shows token usage and waste ratio for Claude Code sessions in the current project.
-
-```bash
-git-semantic usage           # snapshot
-git-semantic usage -w        # watch mode, refreshes every 2s
-git-semantic usage -w 5      # watch mode, refreshes every 5s
-git-semantic usage -s 10     # show last 10 sessions
-```
-
-```
-Project: /Users/you/your-project
-
-SESSION        TURNS    BASELINE     LATEST       WASTE      TOTAL      GROWTH
---------------------------------------------------------------------------------
-3b218a3a       20       18k          19k          1.1x       374k       ▃▃▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-```
-
-- **BASELINE** — avg tokens/turn for first 5 turns
-- **LATEST** — avg tokens/turn for last 3 turns
-- **WASTE** — LATEST / BASELINE (1x = healthy, 5x+ = degrading)
-- **GROWTH** — sparkline per turn, yellow at 2.5x+, red at 5x+
 
 ### `git-semantic config`
 
