@@ -50,6 +50,8 @@ git-semantic grep "session token storage" -n 5
 
 Hybrid search: BM25 + semantic embeddings + graph proximity via Reciprocal Rank Fusion. Use when `map` didn't surface what you need. Both natural language and exact identifiers work — BM25 handles exact matches precisely.
 
+![grep](../demo/grep.gif)
+
 **Higher score = more relevant.** A result scoring 2x the next is an unambiguous match.
 
 ### `health` — inspect
@@ -62,6 +64,8 @@ git-semantic health --community "auth"
 See [health.md](health.md) for the full guide.
 
 ---
+
+![navigate workflow](../demo/navigate.gif)
 
 ## The discipline
 

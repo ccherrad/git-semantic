@@ -44,6 +44,8 @@ git-semantic index
 
 First run downloads the Gemma model (~500MB, cached at `~/.cache/fastembed`). Subsequent runs are incremental.
 
+![index and hydrate](../demo/index.gif)
+
 **Step 3 — Search**
 
 ```bash

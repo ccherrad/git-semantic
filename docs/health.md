@@ -8,6 +8,8 @@ git-semantic health
 
 ---
 
+![health heatmap](../demo/health.gif)
+
 ## Reading the output
 
 ```
