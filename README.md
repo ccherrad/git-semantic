@@ -40,6 +40,16 @@ src/chunking/mod.rs  →        src/chunking/mod.rs
 
 ---
 
+## Getting started
+
+→ **[Quickstart](docs/quickstart.md)** — install, index, and share in under 5 minutes
+→ **[Navigation guide](docs/navigation.md)** — map / get / grep workflow with examples
+→ **[Repo health](docs/health.md)** — reading the heatmap, drilling into communities
+→ **[CI setup](docs/ci.md)** — keep the index fresh automatically
+→ **[MCP setup](docs/mcp.md)** — connect to Claude Code, Cursor, Windsurf
+
+---
+
 ## Installation
 
 ```bash
