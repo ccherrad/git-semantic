@@ -19,7 +19,6 @@ impl Database {
         let config = EmbeddingConfig::load_or_default()?;
         let dim = embedding_dim.unwrap_or(match config.provider {
             crate::embed::EmbeddingProviderType::OpenAI => 1536,
-            crate::embed::EmbeddingProviderType::Onnx => config.onnx.embedding_dim,
             crate::embed::EmbeddingProviderType::Gemma => config.gemma.embedding_dim,
         });
 
@@ -471,6 +470,7 @@ impl Database {
         let bm25 = self.search_bm25(query, limit).unwrap_or_default();
 
         let key = |c: &CodeChunk| format!("{}:{}-{}", c.file_path, c.start_line, c.end_line);
+        let file_key = |c: &CodeChunk| c.file_path.clone();
 
         let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
 
@@ -481,13 +481,37 @@ impl Database {
             *scores.entry(key(chunk)).or_insert(0.0) += 1.0 / (60.0 + rank as f32 + 1.0);
         }
 
+        // Graph proximity: files connected (via edges) to top semantic results rank higher
+        let top_files: Vec<String> = semantic
+            .iter()
+            .take(5)
+            .map(file_key)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let top_file_refs: Vec<&str> = top_files.iter().map(|s| s.as_str()).collect();
+        let connected = self.connected_files(&top_file_refs).unwrap_or_default();
+
         let mut all: Vec<CodeChunk> = semantic.into_iter().chain(bm25).collect();
+        all.dedup_by(|a, b| key(a) == key(b));
+
+        // Build graph-proximity rank: chunks whose file is connected to top results
+        let graph_ranked: Vec<usize> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| connected.contains(&c.file_path))
+            .map(|(i, _)| i)
+            .collect();
+        for (rank, idx) in graph_ranked.iter().enumerate() {
+            let k = key(&all[*idx]);
+            *scores.entry(k).or_insert(0.0) += 1.0 / (60.0 + rank as f32 + 1.0);
+        }
+
         all.sort_by(|a, b| {
             let sa = scores.get(&key(a)).copied().unwrap_or(0.0);
             let sb = scores.get(&key(b)).copied().unwrap_or(0.0);
             sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
         });
-        all.dedup_by(|a, b| key(a) == key(b));
         all.truncate(limit as usize);
 
         for chunk in &mut all {
@@ -495,6 +519,183 @@ impl Database {
         }
 
         Ok(all)
+    }
+
+    pub fn file_embeddings_for(&self, files: &[&str]) -> Result<Vec<(String, Vec<f32>)>> {
+        if files.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders = (1..=files.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT file_path, embedding FROM code_chunks WHERE file_path IN ({})",
+            placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            files.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+        let mut by_file: std::collections::HashMap<String, Vec<Vec<f32>>> =
+            std::collections::HashMap::new();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let file: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((file, blob))
+        })?;
+        for row in rows {
+            let (file, blob) = row?;
+            let emb: Vec<f32> = bincode::deserialize(&blob)
+                .map_err(|_| anyhow::anyhow!("Failed to deserialize embedding"))?;
+            by_file.entry(file).or_default().push(emb);
+        }
+
+        let result = by_file
+            .into_iter()
+            .map(|(file, embs)| {
+                let dim = embs[0].len();
+                let n = embs.len() as f32;
+                let mut avg = vec![0.0f32; dim];
+                for e in &embs {
+                    for (i, v) in e.iter().enumerate() {
+                        avg[i] += v;
+                    }
+                }
+                avg.iter_mut().for_each(|v| *v /= n);
+                (file, avg)
+            })
+            .collect();
+        Ok(result)
+    }
+
+    pub fn subsystem_embeddings(&self) -> Result<Vec<(String, String, Vec<f32>)>> {
+        let subsystems = self.all_subsystems()?;
+        let mut result = Vec::new();
+
+        for sub in subsystems {
+            let files: Vec<&str> = sub.chunks.iter().map(|c| c.file.as_str()).collect();
+            let file_embs = self.file_embeddings_for(&files).unwrap_or_default();
+            if file_embs.is_empty() {
+                continue;
+            }
+            let dim = file_embs[0].1.len();
+            let n = file_embs.len() as f32;
+            let mut avg = vec![0.0f32; dim];
+            for (_, emb) in &file_embs {
+                for (i, v) in emb.iter().enumerate() {
+                    avg[i] += v;
+                }
+            }
+            avg.iter_mut().for_each(|v| *v /= n);
+            result.push((sub.name, sub.description, avg));
+        }
+
+        Ok(result)
+    }
+
+    pub fn edges_for_file(&self, file_path: &str) -> Result<Vec<crate::map::Edge>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT from_file, to_file, via_json FROM edges WHERE to_file = ?1 AND from_file != ?1",
+        )?;
+
+        let edges = stmt
+            .query_map(params![file_path], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .map(|row| {
+                let (from, to, via_json) = row?;
+                let via: Vec<String> = serde_json::from_str(&via_json)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse via: {}", e))?;
+                Ok(crate::map::Edge { from, to, via })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(edges)
+    }
+
+    pub fn connected_files(&self, files: &[&str]) -> Result<std::collections::HashSet<String>> {
+        if files.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+
+        let placeholders = (1..=files.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "SELECT DISTINCT from_file FROM edges WHERE to_file IN ({0})
+             UNION
+             SELECT DISTINCT to_file FROM edges WHERE from_file IN ({0})",
+            placeholders
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = files
+            .iter()
+            .chain(files.iter())
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
+
+        let connected = stmt
+            .query_map(params.as_slice(), |row| row.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+
+        Ok(connected)
+    }
+
+    pub fn all_edges(&self) -> Result<Vec<crate::map::Edge>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT from_file, to_file, via_json FROM edges")?;
+        let edges = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .map(|row| {
+                let (from, to, via_json) = row?;
+                let via: Vec<String> = serde_json::from_str(&via_json)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse via: {}", e))?;
+                Ok(crate::map::Edge { from, to, via })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(edges)
+    }
+
+    pub fn get_chunks_for_file(&self, file_path: &str) -> Result<Vec<CodeChunk>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_path, start_line, end_line, content, embedding
+             FROM code_chunks
+             WHERE file_path = ?1
+             ORDER BY start_line",
+        )?;
+
+        let chunks = stmt
+            .query_map(params![file_path], |row| {
+                let embedding_blob: Vec<u8> = row.get(4)?;
+                let embedding: Vec<f32> = bincode::deserialize(&embedding_blob)
+                    .map_err(|_e| rusqlite::Error::InvalidQuery)?;
+                Ok(CodeChunk {
+                    file_path: row.get(0)?,
+                    start_line: row.get(1)?,
+                    end_line: row.get(2)?,
+                    content: row.get(3)?,
+                    embedding,
+                    distance: None,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(chunks)
     }
 
     pub fn search_similar(&self, query_embedding: &[f32], limit: i64) -> Result<Vec<CodeChunk>> {

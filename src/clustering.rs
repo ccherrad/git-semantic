@@ -64,6 +64,7 @@ where
 
         let dir = file_dir(&centroid_file.file);
         let description = build_description(&dir, centroid_file, group_files);
+        let name = build_name(&dir, centroid_file, group_files);
         let description_embedding = description_embedder(&description)?;
 
         let mut sorted_files: Vec<&&FileUnit> = group_files.iter().collect();
@@ -85,7 +86,7 @@ where
         }
 
         subsystems.push(Subsystem {
-            name: slugify(&description),
+            name,
             description,
             description_embedding,
             chunks,
@@ -110,16 +111,15 @@ fn leiden_cluster(file_units: &[FileUnit]) -> Vec<Vec<&FileUnit>> {
         return file_units.iter().map(|f| vec![f]).collect();
     }
 
-    // Build similarity graph: add edge between files if cosine similarity > threshold
-    // similarity = 1 - cosine_distance, must be positive for leiden-rs
-    const SIMILARITY_THRESHOLD: f32 = 0.35;
+    // Only connect files with strong semantic similarity.
+    // Higher threshold = sparser graph = more, tighter communities.
+    const SIMILARITY_THRESHOLD: f32 = 0.65;
 
     let mut builder = GraphDataBuilder::new(n);
     for i in 0..n {
         for j in (i + 1)..n {
             let sim = 1.0 - cosine_distance(&file_units[i].embedding, &file_units[j].embedding);
             if sim > SIMILARITY_THRESHOLD {
-                // leiden-rs requires f64 weights
                 let _ = builder.add_edge(i, j, sim as f64);
             }
         }
@@ -130,8 +130,13 @@ fn leiden_cluster(file_units: &[FileUnit]) -> Vec<Vec<&FileUnit>> {
         Err(_) => return file_units.iter().map(|f| vec![f]).collect(),
     };
 
+    // Cap at ~10% of total files, so communities stay focused but scale with repo size.
+    // Floor 5 (tiny repos), ceiling 50 (very large repos).
+    let max_comm = (n / 10).clamp(5, 50);
     let config = LeidenConfig {
         seed: Some(42),
+        resolution: 2.0,
+        max_comm_size: max_comm,
         ..Default::default()
     };
 
@@ -180,10 +185,49 @@ fn file_dir(file: &str) -> String {
         .to_string()
 }
 
+fn is_code_file(file: &str) -> bool {
+    let ext = std::path::Path::new(file)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    matches!(
+        ext,
+        "rs" | "py"
+            | "js"
+            | "ts"
+            | "jsx"
+            | "tsx"
+            | "go"
+            | "java"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "cs"
+            | "rb"
+            | "swift"
+            | "kt"
+            | "scala"
+            | "php"
+            | "ex"
+            | "exs"
+            | "ml"
+            | "mli"
+            | "hs"
+            | "clj"
+            | "cljs"
+            | "elm"
+            | "vue"
+            | "svelte"
+    )
+}
+
 fn aggregate_by_file(inputs: &[ClusterInput]) -> Vec<FileUnit> {
     let mut by_file: HashMap<String, Vec<&ClusterInput>> = HashMap::new();
     for input in inputs {
-        by_file.entry(input.file.clone()).or_default().push(input);
+        if is_code_file(&input.file) {
+            by_file.entry(input.file.clone()).or_default().push(input);
+        }
     }
 
     let mut units: Vec<FileUnit> = by_file
@@ -240,6 +284,65 @@ fn group_by_directory(file_units: Vec<FileUnit>) -> Vec<DirGroup> {
     groups
 }
 
+fn build_name(dir: &str, centroid_file: &FileUnit, all_files: &[&FileUnit]) -> String {
+    // Use the common directory prefix if the cluster spans multiple dirs,
+    // otherwise use the centroid file stem.
+    let dirs: std::collections::HashSet<String> =
+        all_files.iter().map(|f| file_dir(&f.file)).collect();
+
+    let prefix = if dirs.len() == 1 {
+        // All files in same dir — use dir name (last segment) + centroid stem
+        let dir_stem = std::path::Path::new(dir)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(dir)
+            .to_string();
+        let file_stem = std::path::Path::new(&centroid_file.file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if dir_stem == file_stem || dir_stem == "." {
+            file_stem
+        } else {
+            format!("{}/{}", dir_stem, file_stem)
+        }
+    } else {
+        // Cluster spans multiple dirs — find longest common path prefix
+        let parts: Vec<Vec<&str>> = all_files
+            .iter()
+            .map(|f| f.file.split('/').collect())
+            .collect();
+        let min_len = parts.iter().map(|p| p.len()).min().unwrap_or(0);
+        let mut common = Vec::new();
+        for i in 0..min_len.saturating_sub(1) {
+            let seg = parts[0][i];
+            if parts.iter().all(|p| p[i] == seg) {
+                common.push(seg);
+            } else {
+                break;
+            }
+        }
+        if common.is_empty() {
+            dir.to_string()
+        } else {
+            common.join("/")
+        }
+    };
+
+    // Top public symbol from centroid file as qualifier — skip private (_foo) names
+    let top_symbol = centroid_file
+        .chunks
+        .iter()
+        .find_map(|c| extract_item_name(&c.text))
+        .filter(|s| !s.starts_with('_') && s.len() > 1);
+
+    match top_symbol {
+        Some(sym) => format!("{} ({})", prefix, sym),
+        None => prefix,
+    }
+}
+
 fn build_description(dir: &str, centroid_file: &FileUnit, all_files: &[&FileUnit]) -> String {
     let stem = std::path::Path::new(&centroid_file.file)
         .file_stem()
@@ -283,36 +386,45 @@ fn build_description(dir: &str, centroid_file: &FileUnit, all_files: &[&FileUnit
 }
 
 fn extract_item_name(text: &str) -> Option<String> {
+    let named = |s: &str| {
+        let n = take_ident(s);
+        if n.is_empty() {
+            None
+        } else {
+            Some(n)
+        }
+    };
+
     for line in text.lines().map(|l| l.trim()) {
         if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
             continue;
         }
         if let Some(rest) = find_keyword(line, "fn ") {
-            return Some(take_ident(rest));
+            return named(rest);
         }
         if let Some(rest) = find_keyword(line, "struct ") {
-            return Some(take_ident(rest));
+            return named(rest);
         }
         if let Some(rest) = find_keyword(line, "impl") {
             let rest = rest.trim_start_matches(|c: char| {
                 c == '<' || c.is_alphanumeric() || c == '_' || c == ',' || c == ' ' || c == '>'
             });
-            return Some(take_ident(rest.trim_start()));
+            return named(rest.trim_start());
         }
         if let Some(rest) = find_keyword(line, "trait ") {
-            return Some(take_ident(rest));
+            return named(rest);
         }
         if let Some(rest) = find_keyword(line, "enum ") {
-            return Some(take_ident(rest));
+            return named(rest);
         }
         if let Some(rest) = find_keyword(line, "def ") {
-            return Some(take_ident(rest));
+            return named(rest);
         }
         if let Some(rest) = find_keyword(line, "class ") {
-            return Some(take_ident(rest));
+            return named(rest);
         }
         if let Some(rest) = find_keyword(line, "func ") {
-            return Some(take_ident(rest));
+            return named(rest);
         }
         break;
     }
@@ -505,6 +617,7 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     1.0 - (dot / (norm_a * norm_b))
 }
 
+#[allow(dead_code)]
 fn slugify(s: &str) -> String {
     s.to_lowercase()
         .chars()

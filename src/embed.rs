@@ -26,14 +26,4 @@ mod tests {
         let result = generate_embedding("test text");
         assert!(result.is_ok());
     }
-
-    #[test]
-    fn test_generate_embedding_with_onnx() {
-        let mut config = EmbeddingConfig::default();
-        config.provider = EmbeddingProviderType::Onnx;
-
-        let result = generate_embedding_with_config("test", Some(config));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 384);
-    }
 }

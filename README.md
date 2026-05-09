@@ -40,7 +40,7 @@ src/chunking/mod.rs  →        src/chunking/mod.rs
 1. `git-semantic index` parses all tracked files, embeds each chunk, clusters files into subsystems using Leiden community detection, builds the spatial map, and commits everything to the `semantic` orphan branch.
 2. `git push origin semantic` shares the embeddings and map with the team.
 3. Everyone else runs `git fetch origin semantic` + `git-semantic hydrate` to populate their local SQLite search index (vector + FTS5) — no re-embedding needed.
-4. Agents use `map` to orient, `get` to retrieve, and `grep` only when the map is insufficient.
+4. Agents use `map` to orient, `get --mode outline` to read cheaply, `get file:start-end` to retrieve exactly, and `grep` only when the map is insufficient.
 
 ---
 
@@ -93,24 +93,77 @@ Output:
   ...
 ```
 
-### `git-semantic get <file:start-end>`
+### `git-semantic get <file> [--mode outline|signatures|full]`
 
-Retrieve a specific chunk by its exact location — or any range that overlaps indexed chunk boundaries.
+Retrieve a file by path or a specific chunk by line range.
+
+**File-level retrieval** (three modes powered by tree-sitter):
+
+```bash
+git-semantic get src/db.rs --mode outline      # name + line range per chunk — cheapest
+git-semantic get src/db.rs --mode signatures   # full declaration, no body
+git-semantic get src/db.rs                     # full content of all chunks
+```
+
+Output includes callers — files outside this one that reference it via edges:
+
+```
+// src/db.rs
+// callers:
+//   src/main.rs (via hydrate_from_branch, grep_semantic)
+
+  L1-126    init_with_dimension
+  L128-140  clear
+  L142-161  insert_subsystem
+  L463-497  search_hybrid
+```
+
+**Chunk-level retrieval** (exact or overlapping range):
 
 ```bash
 git-semantic get src/embed.rs:9-17
 git-semantic get src/embeddings/config.rs:0-100   # returns all overlapping chunks merged
 ```
 
+| mode | mechanism | typical savings vs raw |
+|------|-----------|----------------------|
+| `outline` | tree-sitter extracts identifier name only | ~96% |
+| `signatures` | tree-sitter cuts at body node, keeps full declaration | ~86% |
+| `full` (default) | all chunks concatenated | ~4% |
+
 ### `git-semantic grep <query>`
 
-Search code using hybrid BM25 + semantic search. Returns matching chunks with full content — no file reading needed. Higher score = more relevant; a result scoring 2x the next is an unambiguous match.
+Search code using three-signal hybrid search: BM25 (FTS5) + semantic embeddings + graph proximity, merged via Reciprocal Rank Fusion. Files connected via call edges to top semantic results are boosted automatically. Higher score = more relevant; a result scoring 2x the next is an unambiguous match.
 
 ```bash
 git-semantic grep "how incoming requests are validated"
 git-semantic grep "error propagation across async boundaries" -n 5
 git-semantic grep "ExactIdentifierName"
 ```
+
+### `git-semantic health [--community <name>]`
+
+Show a cohesion/coupling heatmap of all semantic communities. Use `--community` to drill into a specific one — shows files, top dependents, and top dependencies.
+
+```bash
+git-semantic health
+git-semantic health --community "database"
+```
+
+### `git-semantic benchmark [--json]`
+
+Measure token savings across read modes for every indexed file, and replay actual navigation queries to compare grep vs map+get strategies.
+
+```bash
+git-semantic benchmark
+git-semantic benchmark --json
+```
+
+Output includes:
+- Token savings by language (outline / signatures vs raw)
+- Read mode comparison table
+- Session cost simulation
+- Navigation comparison: grep precision vs map+outline+get precision across sampled subsystems
 
 ### `git-semantic enable claude`
 
@@ -172,22 +225,29 @@ The agent follows this workflow:
 ```bash
 git-semantic map "natural language description of the task"
 ```
-Read the output. If it names the function or file needed — skip to step 2 immediately.
+Read the output. If it names the function or file needed — go to step 2 immediately.
 
-**Step 2 — retrieve**
+**Step 2 — read cheaply**
+```bash
+git-semantic get src/file.rs --mode outline      # names + line ranges, ~96% token reduction
+git-semantic get src/file.rs --mode signatures   # declarations only, ~86% token reduction
+```
+Start with outline. If the declaration alone is enough, stop. If you need the body, go to step 3.
+
+**Step 3 — retrieve exactly**
 ```bash
 git-semantic get src/file.rs:start-end
 ```
-Use the locations from the map directly. Maximum 3 calls per task.
+Use the line ranges from the outline output directly. Maximum 3 calls per task.
 
-**Step 3 — search (last resort)**
+**Step 4 — search (last resort)**
 ```bash
 git-semantic grep "natural language query"
 git-semantic grep "ExactIdentifierName"
 ```
-Use when the map was genuinely insufficient. Supports natural language and exact identifiers — search is hybrid (BM25 + semantic). Higher score = more relevant. For exact identifier lookups prefer `grep` over `map` — BM25 will find it precisely.
+Use when the map was genuinely insufficient. Search is hybrid (BM25 + semantic + graph proximity). For exact identifier lookups prefer `grep` over `map` — BM25 will find it precisely.
 
-Outside the agent, normal tools work freely. The navigation discipline applies only when the agent is active — orient once, retrieve directly, never re-search what the map already answered.
+Outside the agent, normal tools work freely. The navigation discipline applies only when the agent is active — orient once, read cheaply, retrieve exactly, never re-search what the map already answered.
 
 ---
 

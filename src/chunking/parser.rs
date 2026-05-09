@@ -4,6 +4,109 @@ use tree_sitter::Parser;
 use super::languages::SupportedLanguage;
 use super::CodeChunk;
 
+const BODY_NODE_TYPES: &[&str] = &[
+    "block",
+    "statement_block",
+    "compound_statement",
+    "class_body",
+    "enum_body",
+    "field_declaration_list",
+    "declaration_list",
+];
+
+pub fn extract_signature(text: &str, language: super::languages::SupportedLanguage) -> String {
+    let mut parser = tree_sitter::Parser::new();
+    let ts_language = language.tree_sitter_language();
+    if parser.set_language(&ts_language).is_err() {
+        return first_line_fallback(text);
+    }
+
+    let tree = match parser.parse(text, None) {
+        Some(t) => t,
+        None => return first_line_fallback(text),
+    };
+
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+
+    // Walk into the first meaningful top-level node
+    let top = root
+        .children(&mut cursor)
+        .find(|n| !n.is_extra() && n.child_count() > 0);
+
+    let node = match top {
+        Some(n) => n,
+        None => return first_line_fallback(text),
+    };
+
+    // Find the body child — everything before it is the signature
+    let mut body_start_byte: Option<usize> = None;
+    let mut node_cursor = node.walk();
+    for child in node.children(&mut node_cursor) {
+        if BODY_NODE_TYPES.contains(&child.kind()) {
+            body_start_byte = Some(child.start_byte());
+            break;
+        }
+    }
+
+    match body_start_byte {
+        Some(body_start) => {
+            let sig = text[..body_start].trim_end_matches([' ', '\t', '{', ':']);
+            sig.trim_end().to_string()
+        }
+        None => text.trim_end_matches('{').trim_end().to_string(),
+    }
+}
+
+pub fn extract_name(text: &str, language: super::languages::SupportedLanguage) -> String {
+    let mut parser = tree_sitter::Parser::new();
+    let ts_language = language.tree_sitter_language();
+    if parser.set_language(&ts_language).is_err() {
+        return first_line_fallback(text);
+    }
+
+    let tree = match parser.parse(text, None) {
+        Some(t) => t,
+        None => return first_line_fallback(text),
+    };
+
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+
+    let top = root
+        .children(&mut cursor)
+        .find(|n| !n.is_extra() && n.child_count() > 0);
+
+    let node = match top {
+        Some(n) => n,
+        None => return first_line_fallback(text),
+    };
+
+    // Name child is typically named "name" in tree-sitter grammars
+    let mut node_cursor = node.walk();
+    for child in node.children(&mut node_cursor) {
+        if child.kind() == "name"
+            || child.kind() == "identifier"
+            || child.kind() == "type_identifier"
+        {
+            if let Ok(name) = child.utf8_text(text.as_bytes()) {
+                return name.to_string();
+            }
+        }
+    }
+
+    first_line_fallback(text)
+}
+
+fn first_line_fallback(text: &str) -> String {
+    text.lines()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(['{', ':'])
+        .trim_end()
+        .to_string()
+}
+
 const CHUNK_NODE_TYPES: &[&str] = &[
     "function_item",
     "function_declaration",

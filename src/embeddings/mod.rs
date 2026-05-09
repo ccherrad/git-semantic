@@ -1,6 +1,5 @@
 pub mod config;
 pub mod gemma;
-pub mod onnx;
 pub mod openai;
 
 use anyhow::Result;
@@ -22,9 +21,6 @@ pub fn create_provider(config: &config::EmbeddingConfig) -> Result<Box<dyn Embed
     match config.provider {
         config::EmbeddingProviderType::OpenAI => {
             Ok(Box::new(openai::OpenAIProvider::new(config.clone())?))
-        }
-        config::EmbeddingProviderType::Onnx => {
-            Ok(Box::new(onnx::ONNXProvider::new(config.clone())?))
         }
         config::EmbeddingProviderType::Gemma => Ok(Box::new(gemma::GemmaProvider::new()?)),
     }
