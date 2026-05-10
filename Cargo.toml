@@ -28,7 +28,7 @@ walkdir = "2.5.0"
 webpki-roots = "1.0"
 zerocopy = "0.8.14"
 
-git-topology = { path = "../git-topology" }
+git-topology = "0.1.1"
 regex = "1.10"
 indicatif = "0.17"
 fastembed = { version = "5", default-features = false, features = ["online", "hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }

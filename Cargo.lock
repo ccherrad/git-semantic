@@ -751,6 +751,8 @@ dependencies = [
 [[package]]
 name = "git-topology"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60944914113763733a48e06d896e595d1f49dc622fa27ad32a687eac77faaa2e"
 dependencies = [
  "anyhow",
  "fastembed",
@@ -773,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "gitsem"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "bincode",
