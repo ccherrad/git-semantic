@@ -112,8 +112,8 @@ mod tests {
 
     #[test]
     fn test_embedding_dimension() {
-        std::env::set_var("OPENAI_API_KEY", "test-key");
-        let config = EmbeddingConfig::default();
+        let mut config = EmbeddingConfig::default();
+        config.openai.api_key = Some("test-key".to_string());
         let provider = OpenAIProvider::new(config).unwrap();
         assert_eq!(provider.embedding_dimension(), 1536);
     }

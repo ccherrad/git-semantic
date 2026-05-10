@@ -1,4 +1,3 @@
-mod chunking;
 mod clustering;
 mod db;
 mod embed;
@@ -53,9 +52,9 @@ enum Commands {
     #[command(about = "Start the MCP server (JSON-RPC over stdio)")]
     Mcp,
 
-    #[command(about = "Show the codebase map or find subsystems matching a query")]
+    #[command(about = "Show the codebase map or find clusters matching a query")]
     Map {
-        #[arg(help = "Natural language query to find matching subsystems (optional)")]
+        #[arg(help = "Natural language query to find matching clusters (optional)")]
         query: Option<String>,
     },
 
@@ -207,7 +206,7 @@ fn index_files_streaming(
             }
         };
 
-        let code_chunks = chunking::chunk_code(&content, Some(relative))?;
+        let code_chunks = git_topology::chunking::chunk_code(&content, Some(relative))?;
         let mut stored: Vec<semantic_branch::StoredChunk> = Vec::new();
 
         for code_chunk in code_chunks {
@@ -238,6 +237,13 @@ fn index_codebase() -> Result<()> {
     let repo_path = PathBuf::from(".");
     let started = Instant::now();
 
+    if !git_topology::EmbeddingConfig::is_provider_configured() {
+        anyhow::bail!(
+            "topology.provider is not configured.\n\
+            Run: git config topology.provider gemma\n\
+              or: git config topology.provider openai"
+        );
+    }
     let config = embed::EmbeddingConfig::load_or_default().unwrap_or_default();
     let mut provider = embed::create_provider(&config)?;
     provider.init()?;
@@ -417,16 +423,16 @@ fn hydrate_from_branch() -> Result<()> {
 
     match semantic_branch::read_semantic_map_from_branch(&repo_path) {
         Ok(map) => {
-            for subsystem in &map.subsystems {
-                db.insert_subsystem(subsystem)
-                    .context("Failed to insert subsystem")?;
+            for cluster in &map.clusters {
+                db.insert_cluster(cluster)
+                    .context("Failed to insert cluster")?;
             }
             for edge in &map.edges {
                 db.insert_edge(edge).context("Failed to insert edge")?;
             }
             println!(
-                "Loaded map: {} subsystems, {} edges.",
-                map.subsystems.len(),
+                "Loaded map: {} clusters, {} edges.",
+                map.clusters.len(),
                 map.edges.len()
             );
         }
@@ -508,11 +514,11 @@ fn mcp_serve() -> Result<()> {
                     "tools": [
                         {
                             "name": "map",
-                            "description": "Orient in the codebase. Returns the most relevant subsystem — semantically clustered files with chunk locations and call edges. Use this first.",
+                            "description": "Orient in the codebase. Returns the most relevant cluster — semantically clustered files with chunk locations and call edges. Use this first.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "query": { "type": "string", "description": "Natural language description of what you are looking for. Omit to list all subsystems." }
+                                    "query": { "type": "string", "description": "Natural language description of what you are looking for. Omit to list all clusters." }
                                 }
                             }
                         },
@@ -542,11 +548,11 @@ fn mcp_serve() -> Result<()> {
                         },
                         {
                             "name": "health",
-                            "description": "Show coupling and fan-in metrics for each subsystem. Optionally filter by subsystem name.",
+                            "description": "Show coupling and fan-in metrics for each cluster. Optionally filter by cluster name.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "community": { "type": "string", "description": "Filter to subsystems whose name contains this string (case-insensitive). Omit for all." }
+                                    "community": { "type": "string", "description": "Filter to clusters whose name contains this string (case-insensitive). Omit for all." }
                                 }
                             }
                         },
@@ -618,17 +624,17 @@ fn mcp_map(query: Option<&str>) -> Result<String> {
 
     match query {
         None => {
-            let subsystems = db.all_subsystems()?;
-            if subsystems.is_empty() {
+            let clusters = db.all_clusters()?;
+            if clusters.is_empty() {
                 return Ok(
                     "Semantic map is empty. Run `git-semantic index` then `git-semantic hydrate`."
                         .into(),
                 );
             }
-            for subsystem in &subsystems {
-                let files: Vec<&str> = subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+            for cluster in &clusters {
+                let files: Vec<&str> = cluster.chunks.iter().map(|c| c.file.as_str()).collect();
                 let edges = db.edges_into(&files)?;
-                out.push_str(&format_subsystem(subsystem, &edges));
+                out.push_str(&format_cluster(cluster, &edges));
             }
         }
         Some(q) => {
@@ -638,11 +644,10 @@ fn mcp_map(query: Option<&str>) -> Result<String> {
                     "Semantic map is empty. Run `git-semantic index` then `git-semantic hydrate`."
                         .into(),
                 ),
-                Some(subsystem) => {
-                    let files: Vec<&str> =
-                        subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+                Some(cluster) => {
+                    let files: Vec<&str> = cluster.chunks.iter().map(|c| c.file.as_str()).collect();
                     let edges = db.edges_into(&files)?;
-                    out.push_str(&format_subsystem(&subsystem, &edges));
+                    out.push_str(&format_cluster(&cluster, &edges));
                 }
             }
         }
@@ -651,20 +656,17 @@ fn mcp_map(query: Option<&str>) -> Result<String> {
     Ok(out)
 }
 
-fn format_subsystem(subsystem: &map::Subsystem, edges: &[map::Edge]) -> String {
+fn format_cluster(cluster: &map::Cluster, edges: &[map::Edge]) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "## {} — {}\n",
-        subsystem.name, subsystem.description
-    ));
+    out.push_str(&format!("## {} — {}\n", cluster.name, cluster.description));
 
-    let subsystem_files: std::collections::HashSet<&str> =
-        subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+    let cluster_files: std::collections::HashSet<&str> =
+        cluster.chunks.iter().map(|c| c.file.as_str()).collect();
 
     let mut entry_points: Vec<(&str, &[String])> = edges
         .iter()
         .filter(|e| {
-            subsystem_files.contains(e.to.as_str()) && !subsystem_files.contains(e.from.as_str())
+            cluster_files.contains(e.to.as_str()) && !cluster_files.contains(e.from.as_str())
         })
         .map(|e| (e.from.as_str(), e.via.as_slice()))
         .collect();
@@ -682,7 +684,7 @@ fn format_subsystem(subsystem: &map::Subsystem, edges: &[map::Edge]) -> String {
         }
     }
 
-    for chunk in &subsystem.chunks {
+    for chunk in &cluster.chunks {
         out.push_str(&format!("  {}\n", chunk.display()));
     }
     out.push('\n');
@@ -797,16 +799,16 @@ fn mcp_health(community: Option<&str>) -> Result<String> {
     // Reuse health_command but capture output — delegate to existing logic via process
     // For now write plain text summary
     let db = db::Database::init()?;
-    let subsystems = db.all_subsystems()?;
-    if subsystems.is_empty() {
+    let clusters = db.all_clusters()?;
+    if clusters.is_empty() {
         return Ok(
             "No index found. Run `git-semantic index` or `git-semantic hydrate` first.".into(),
         );
     }
     let all_edges = db.all_edges()?;
 
-    for subsystem in &subsystems {
-        let files: Vec<&str> = subsystem
+    for cluster in &clusters {
+        let files: Vec<&str> = cluster
             .chunks
             .iter()
             .map(|c| c.file.as_str())
@@ -815,11 +817,7 @@ fn mcp_health(community: Option<&str>) -> Result<String> {
             .collect();
 
         if let Some(filter) = community {
-            if !subsystem
-                .name
-                .to_lowercase()
-                .contains(&filter.to_lowercase())
-            {
+            if !cluster.name.to_lowercase().contains(&filter.to_lowercase()) {
                 continue;
             }
         }
@@ -836,9 +834,9 @@ fn mcp_health(community: Option<&str>) -> Result<String> {
 
         out.push(format!(
             "{} — files: {}  chunks: {}  coup-out: {}  fan-in: {}",
-            subsystem.name,
+            cluster.name,
             files.len(),
-            subsystem.chunks.len(),
+            cluster.chunks.len(),
             coupling_out,
             fan_in
         ));
@@ -854,9 +852,9 @@ fn map_command(query: Option<&str>) -> Result<()> {
 
 fn health_command(community_filter: Option<&str>) -> Result<()> {
     let db = db::Database::init().context("Failed to open semantic database")?;
-    let subsystems = db.all_subsystems().context("Failed to load subsystems")?;
+    let clusters = db.all_clusters().context("Failed to load clusters")?;
 
-    if subsystems.is_empty() {
+    if clusters.is_empty() {
         anyhow::bail!("No index found. Run `git-semantic index` or `git-semantic hydrate` first.");
     }
 
@@ -873,8 +871,8 @@ fn health_command(community_filter: Option<&str>) -> Result<()> {
 
     let mut rows: Vec<CommunityHealth> = Vec::new();
 
-    for subsystem in &subsystems {
-        let files: Vec<&str> = subsystem
+    for cluster in &clusters {
+        let files: Vec<&str> = cluster
             .chunks
             .iter()
             .map(|c| c.file.as_str())
@@ -883,7 +881,7 @@ fn health_command(community_filter: Option<&str>) -> Result<()> {
             .collect();
 
         let file_count = files.len();
-        let chunk_count = subsystem.chunks.len();
+        let chunk_count = cluster.chunks.len();
 
         let file_set: std::collections::HashSet<&str> = files.iter().copied().collect();
 
@@ -920,7 +918,7 @@ fn health_command(community_filter: Option<&str>) -> Result<()> {
         };
 
         rows.push(CommunityHealth {
-            name: subsystem.name.clone(),
+            name: cluster.name.clone(),
             files: file_count,
             chunks: chunk_count,
             cohesion,
@@ -932,11 +930,11 @@ fn health_command(community_filter: Option<&str>) -> Result<()> {
     // Drill-down mode
     if let Some(filter) = community_filter {
         let filter_lc = filter.to_lowercase();
-        let matched = subsystems
+        let matched = clusters
             .iter()
             .find(|s| s.name.to_lowercase().contains(&filter_lc));
 
-        let subsystem = matched.ok_or_else(|| {
+        let cluster = matched.ok_or_else(|| {
             anyhow::anyhow!(
                 "No community matching '{}'. Run `git-semantic health` to list all.",
                 filter
@@ -944,7 +942,7 @@ fn health_command(community_filter: Option<&str>) -> Result<()> {
         })?;
 
         let file_set: std::collections::HashSet<&str> =
-            subsystem.chunks.iter().map(|c| c.file.as_str()).collect();
+            cluster.chunks.iter().map(|c| c.file.as_str()).collect();
         let files: Vec<&str> = {
             let mut v: Vec<&str> = file_set.iter().copied().collect();
             v.sort();
@@ -958,11 +956,11 @@ fn health_command(community_filter: Option<&str>) -> Result<()> {
         let yellow = "\x1b[33m";
         let green = "\x1b[32m";
 
-        println!("\n{bold}{}{reset}", subsystem.name);
-        println!("{}", "─".repeat(subsystem.name.len().max(40)));
+        println!("\n{bold}{}{reset}", cluster.name);
+        println!("{}", "─".repeat(cluster.name.len().max(40)));
 
         // Metrics for this community
-        let row = rows.iter().find(|r| r.name == subsystem.name);
+        let row = rows.iter().find(|r| r.name == cluster.name);
         if let Some(r) = row {
             let cohesion_col = if r.cohesion >= 0.75 {
                 green
@@ -1009,7 +1007,7 @@ fn health_command(community_filter: Option<&str>) -> Result<()> {
             let mut by_community: std::collections::HashMap<String, Vec<&str>> =
                 std::collections::HashMap::new();
             for edge in &inbound {
-                let comm_name = subsystems
+                let comm_name = clusters
                     .iter()
                     .find(|s| s.chunks.iter().any(|c| c.file == edge.from))
                     .map(|s| s.name.clone())
@@ -1052,7 +1050,7 @@ fn health_command(community_filter: Option<&str>) -> Result<()> {
             let mut by_community: std::collections::HashMap<String, Vec<&str>> =
                 std::collections::HashMap::new();
             for edge in &outbound {
-                let comm_name = subsystems
+                let comm_name = clusters
                     .iter()
                     .find(|s| s.chunks.iter().any(|c| c.file == edge.to))
                     .map(|s| s.name.clone())
@@ -1290,8 +1288,8 @@ fn tokens(s: &str) -> usize {
 }
 
 fn chunk_name(chunk: &models::CodeChunk, file_path: &str) -> String {
-    match chunking::languages::detect_language(file_path) {
-        Some(lang) => chunking::parser::extract_name(&chunk.content, lang),
+    match git_topology::chunking::languages::detect_language(file_path) {
+        Some(lang) => git_topology::chunking::parser::extract_name(&chunk.content, lang),
         None => chunk
             .content
             .lines()
@@ -1317,8 +1315,8 @@ fn outline_tokens(chunks: &[models::CodeChunk]) -> usize {
 }
 
 fn chunk_signature(chunk: &models::CodeChunk, file_path: &str) -> String {
-    match chunking::languages::detect_language(file_path) {
-        Some(lang) => chunking::parser::extract_signature(&chunk.content, lang),
+    match git_topology::chunking::languages::detect_language(file_path) {
+        Some(lang) => git_topology::chunking::parser::extract_signature(&chunk.content, lang),
         None => chunk
             .content
             .lines()
@@ -1345,16 +1343,16 @@ fn signatures_tokens(chunks: &[models::CodeChunk]) -> usize {
 
 fn benchmark_command(as_json: bool) -> Result<()> {
     let db = db::Database::init().context("Failed to initialize database")?;
-    let subsystems = db.all_subsystems().context("Failed to load subsystems")?;
+    let clusters = db.all_clusters().context("Failed to load clusters")?;
 
-    if subsystems.is_empty() {
+    if clusters.is_empty() {
         anyhow::bail!(
             "No index found. Run `git-semantic index` then `git-semantic hydrate` first."
         );
     }
 
-    // Collect unique files across all subsystems
-    let mut all_files: Vec<String> = subsystems
+    // Collect unique files across all clusters
+    let mut all_files: Vec<String> = clusters
         .iter()
         .flat_map(|s| s.chunks.iter().map(|c| c.file.clone()))
         .collect::<std::collections::HashSet<_>>()
@@ -1688,7 +1686,7 @@ fn benchmark_command(as_json: bool) -> Result<()> {
     );
 
     // Navigation comparison — replay actual queries against the index
-    run_navigation_benchmark(&db, &subsystems, as_json, &colors)?;
+    run_navigation_benchmark(&db, &clusters, as_json, &colors)?;
 
     Ok(())
 }
@@ -1703,7 +1701,7 @@ struct Colors<'a> {
 
 fn run_navigation_benchmark(
     db: &db::Database,
-    subsystems: &[map::Subsystem],
+    clusters: &[map::Cluster],
     as_json: bool,
     colors: &Colors,
 ) -> Result<()> {
@@ -1714,12 +1712,12 @@ fn run_navigation_benchmark(
         yellow,
         reset,
     } = colors;
-    let sub_embeddings = match db.subsystem_embeddings() {
+    let sub_embeddings = match db.cluster_embeddings() {
         Ok(e) if !e.is_empty() => e,
         Ok(_) => {
             if !as_json {
                 println!(
-                    "\n{dim}Navigation benchmark skipped — subsystem embeddings empty.{reset}",
+                    "\n{dim}Navigation benchmark skipped — cluster embeddings empty.{reset}",
                     dim = dim,
                     reset = reset
                 );
@@ -1739,7 +1737,7 @@ fn run_navigation_benchmark(
         }
     };
 
-    // Sample up to 10 subsystems spread evenly across the index
+    // Sample up to 10 clusters spread evenly across the index
     let total = sub_embeddings.len();
     let sample_n = 10.min(total);
     let step = total / sample_n;
@@ -1747,7 +1745,7 @@ fn run_navigation_benchmark(
         (0..sample_n).map(|i| &sub_embeddings[i * step]).collect();
 
     struct NavResult {
-        subsystem: String,
+        cluster: String,
         grep_tokens: usize,
         grep_precision: bool,
         outline_tokens: usize,
@@ -1764,8 +1762,8 @@ fn run_navigation_benchmark(
     let mut results: Vec<NavResult> = Vec::new();
 
     for (name, _desc, embedding) in &samples {
-        // Ground truth: files belonging to this subsystem
-        let ground_truth_files: std::collections::HashSet<String> = subsystems
+        // Ground truth: files belonging to this cluster
+        let ground_truth_files: std::collections::HashSet<String> = clusters
             .iter()
             .find(|s| &s.name == name)
             .map(|s| s.chunks.iter().map(|c| c.file.clone()).collect())
@@ -1781,12 +1779,12 @@ fn run_navigation_benchmark(
             .map(|c| ground_truth_files.contains(&c.file_path))
             .unwrap_or(false);
 
-        // Strategy B: map → outline all subsystem files → get top 3 chunks
-        // map output is the subsystem description + chunk list (fixed cost)
-        // outline: generate outline for all files in the matched subsystem
-        let matched_subsystem = subsystems.iter().find(|s| &s.name == name);
+        // Strategy B: map → outline all cluster files → get top 3 chunks
+        // map output is the cluster description + chunk list (fixed cost)
+        // outline: generate outline for all files in the matched cluster
+        let matched_cluster = clusters.iter().find(|s| &s.name == name);
         let (outline_tokens, outline_precision, sigs_tokens, sigs_precision) =
-            if let Some(sub) = matched_subsystem {
+            if let Some(sub) = matched_cluster {
                 let sub_files: Vec<String> = sub
                     .chunks
                     .iter()
@@ -1820,7 +1818,7 @@ fn run_navigation_benchmark(
             };
 
         results.push(NavResult {
-            subsystem: name.clone(),
+            cluster: name.clone(),
             grep_tokens,
             grep_precision,
             outline_tokens,
@@ -1891,7 +1889,10 @@ fn run_navigation_benchmark(
         return Ok(());
     }
 
-    println!("\n{bold}Navigation comparison{reset}  {dim}({} sample queries, one per subsystem){reset}\n", results.len());
+    println!(
+        "\n{bold}Navigation comparison{reset}  {dim}({} sample queries, one per cluster){reset}\n",
+        results.len()
+    );
     println!(
         "{dim}{:<30}  {:>12}  {:>10}  {:>8}{reset}",
         "STRATEGY",
@@ -1980,7 +1981,7 @@ fn run_navigation_benchmark(
         );
     } else {
         println!(
-            "  Token overhead vs grep:       {yellow}{:.1}%{reset}  {dim}(larger subsystems, higher precision){reset}",
+            "  Token overhead vs grep:       {yellow}{:.1}%{reset}  {dim}(larger clusters, higher precision){reset}",
             tok_delta.abs(), yellow = yellow, dim = dim, reset = reset
         );
     }
@@ -1990,11 +1991,11 @@ fn run_navigation_benchmark(
         cost(avg_grep * 10)
     );
     println!(
-        "\n{dim}Precision = top result belongs to the correct subsystem\n\
-         Subsystems sampled: {}{reset}",
+        "\n{dim}Precision = top result belongs to the correct cluster\n\
+         Clusters sampled: {}{reset}",
         results
             .iter()
-            .map(|r| r.subsystem.as_str())
+            .map(|r| r.cluster.as_str())
             .collect::<Vec<_>>()
             .join(", "),
         dim = dim,
@@ -2005,7 +2006,7 @@ fn run_navigation_benchmark(
 }
 
 fn to_git_key(key: &str) -> String {
-    format!("semantic.{}", key)
+    format!("topology.{}", key)
 }
 
 fn config_command(

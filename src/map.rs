@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SemanticMap {
     pub version: u8,
-    pub subsystems: Vec<Subsystem>,
+    pub clusters: Vec<Cluster>,
     #[serde(default)]
     pub edges: Vec<Edge>,
 }
@@ -16,7 +16,7 @@ pub struct Edge {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Subsystem {
+pub struct Cluster {
     pub name: String,
     pub description: String,
     pub description_embedding: Vec<f32>,
@@ -50,7 +50,7 @@ impl SemanticMap {
     pub fn empty() -> Self {
         SemanticMap {
             version: 1,
-            subsystems: vec![],
+            clusters: vec![],
             edges: vec![],
         }
     }

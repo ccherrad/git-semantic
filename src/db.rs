@@ -79,31 +79,31 @@ impl Database {
         .context("Failed to create vec_metadata table")?;
 
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS subsystems (
+            "CREATE TABLE IF NOT EXISTS clusters (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 description TEXT NOT NULL,
                 chunks_json TEXT NOT NULL
             );",
         )
-        .context("Failed to create subsystems table")?;
+        .context("Failed to create clusters table")?;
 
-        let subsystem_vec_exists: bool = conn
+        let cluster_vec_exists: bool = conn
             .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='vec_subsystems'",
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='vec_clusters'",
                 [],
                 |row| row.get(0),
             )
             .unwrap_or(0)
             > 0;
 
-        if !subsystem_vec_exists {
-            let create_subsystem_vec = format!(
-                "CREATE VIRTUAL TABLE vec_subsystems USING vec0(embedding FLOAT[{}]);",
+        if !cluster_vec_exists {
+            let create_cluster_vec = format!(
+                "CREATE VIRTUAL TABLE vec_clusters USING vec0(embedding FLOAT[{}]);",
                 dim
             );
-            conn.execute_batch(&create_subsystem_vec)
-                .context("Failed to create vec_subsystems virtual table")?;
+            conn.execute_batch(&create_cluster_vec)
+                .context("Failed to create vec_clusters virtual table")?;
         }
 
         conn.execute_batch(
@@ -132,29 +132,29 @@ impl Database {
                  DELETE FROM vec_metadata;
                  DELETE FROM vec_chunks;
                  DELETE FROM code_chunks;
-                 DELETE FROM subsystems;
-                 DELETE FROM vec_subsystems;
+                 DELETE FROM clusters;
+                 DELETE FROM vec_clusters;
                  DELETE FROM edges;",
             )
             .context("Failed to clear database")
     }
 
-    pub fn insert_subsystem(&self, subsystem: &crate::map::Subsystem) -> Result<()> {
+    pub fn insert_cluster(&self, cluster: &crate::map::Cluster) -> Result<()> {
         use zerocopy::IntoBytes;
 
-        let chunks_json = serde_json::to_string(&subsystem.chunks)
-            .context("Failed to serialize subsystem chunks")?;
+        let chunks_json =
+            serde_json::to_string(&cluster.chunks).context("Failed to serialize cluster chunks")?;
 
         self.conn.execute(
-            "INSERT INTO subsystems (name, description, chunks_json) VALUES (?1, ?2, ?3)",
-            params![&subsystem.name, &subsystem.description, &chunks_json],
+            "INSERT INTO clusters (name, description, chunks_json) VALUES (?1, ?2, ?3)",
+            params![&cluster.name, &cluster.description, &chunks_json],
         )?;
 
-        let subsystem_id = self.conn.last_insert_rowid();
+        let cluster_id = self.conn.last_insert_rowid();
 
         self.conn.execute(
-            "INSERT INTO vec_subsystems (rowid, embedding) VALUES (?1, ?2)",
-            params![subsystem_id, subsystem.description_embedding.as_bytes()],
+            "INSERT INTO vec_clusters (rowid, embedding) VALUES (?1, ?2)",
+            params![cluster_id, cluster.description_embedding.as_bytes()],
         )?;
 
         Ok(())
@@ -169,13 +169,13 @@ impl Database {
         Ok(())
     }
 
-    pub fn query_map(&self, query_embedding: &[f32]) -> Result<Option<crate::map::Subsystem>> {
+    pub fn query_map(&self, query_embedding: &[f32]) -> Result<Option<crate::map::Cluster>> {
         use zerocopy::IntoBytes;
 
         let mut stmt = self.conn.prepare(
             "SELECT s.name, s.description, s.chunks_json, v.distance
-             FROM vec_subsystems v
-             JOIN subsystems s ON v.rowid = s.id
+             FROM vec_clusters v
+             JOIN clusters s ON v.rowid = s.id
              WHERE v.embedding MATCH ?1 AND k = 1
              ORDER BY distance",
         )?;
@@ -192,7 +192,7 @@ impl Database {
             let (name, description, chunks_json) = row?;
             let chunks: Vec<crate::map::ChunkRef> = serde_json::from_str(&chunks_json)
                 .map_err(|e| anyhow::anyhow!("Failed to parse chunks: {}", e))?;
-            Ok(Some(crate::map::Subsystem {
+            Ok(Some(crate::map::Cluster {
                 name,
                 description,
                 description_embedding: vec![],
@@ -203,12 +203,12 @@ impl Database {
         }
     }
 
-    pub fn all_subsystems(&self) -> Result<Vec<crate::map::Subsystem>> {
+    pub fn all_clusters(&self) -> Result<Vec<crate::map::Cluster>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT name, description, chunks_json FROM subsystems ORDER BY id")?;
+            .prepare("SELECT name, description, chunks_json FROM clusters ORDER BY id")?;
 
-        let subsystems = stmt
+        let clusters = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -220,7 +220,7 @@ impl Database {
                 let (name, description, chunks_json) = row?;
                 let chunks: Vec<crate::map::ChunkRef> = serde_json::from_str(&chunks_json)
                     .map_err(|e| anyhow::anyhow!("Failed to parse chunks: {}", e))?;
-                Ok(crate::map::Subsystem {
+                Ok(crate::map::Cluster {
                     name,
                     description,
                     description_embedding: vec![],
@@ -229,15 +229,15 @@ impl Database {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(subsystems)
+        Ok(clusters)
     }
 
-    pub fn edges_into(&self, subsystem_files: &[&str]) -> Result<Vec<crate::map::Edge>> {
-        if subsystem_files.is_empty() {
+    pub fn edges_into(&self, cluster_files: &[&str]) -> Result<Vec<crate::map::Edge>> {
+        if cluster_files.is_empty() {
             return Ok(vec![]);
         }
 
-        let n = subsystem_files.len();
+        let n = cluster_files.len();
         let in_placeholders = (1..=n)
             .map(|i| format!("?{}", i))
             .collect::<Vec<_>>()
@@ -255,9 +255,9 @@ impl Database {
 
         let mut stmt = self.conn.prepare(&sql)?;
 
-        let params: Vec<&dyn rusqlite::ToSql> = subsystem_files
+        let params: Vec<&dyn rusqlite::ToSql> = cluster_files
             .iter()
-            .chain(subsystem_files.iter())
+            .chain(cluster_files.iter())
             .map(|s| s as &dyn rusqlite::ToSql)
             .collect();
 
@@ -569,11 +569,11 @@ impl Database {
         Ok(result)
     }
 
-    pub fn subsystem_embeddings(&self) -> Result<Vec<(String, String, Vec<f32>)>> {
-        let subsystems = self.all_subsystems()?;
+    pub fn cluster_embeddings(&self) -> Result<Vec<(String, String, Vec<f32>)>> {
+        let clusters = self.all_clusters()?;
         let mut result = Vec::new();
 
-        for sub in subsystems {
+        for sub in clusters {
             let files: Vec<&str> = sub.chunks.iter().map(|c| c.file.as_str()).collect();
             let file_embs = self.file_embeddings_for(&files).unwrap_or_default();
             if file_embs.is_empty() {
@@ -790,6 +790,11 @@ mod tests {
                 end_line INTEGER NOT NULL,
                 content TEXT NOT NULL
             );",
+        )?;
+
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks
+             USING fts5(file_path UNINDEXED, start_line UNINDEXED, end_line UNINDEXED, content, content=code_chunks, content_rowid=id);",
         )?;
 
         Ok(Database { conn })

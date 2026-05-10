@@ -1,4 +1,4 @@
-use crate::map::{ChunkRef, Edge, SemanticMap, Subsystem};
+use crate::map::{ChunkRef, Cluster, Edge, SemanticMap};
 use crate::semantic_branch::StoredChunk;
 use anyhow::Result;
 use leiden_rs::{GraphDataBuilder, Leiden, LeidenConfig};
@@ -37,7 +37,7 @@ where
     // Build dir_groups structure for edge detection (reuse existing logic)
     let dir_groups = group_by_directory_refs(&file_units, &communities);
 
-    let mut subsystems = Vec::new();
+    let mut clusters = Vec::new();
 
     for group_files in &communities {
         let dim = group_files[0].embedding.len();
@@ -85,7 +85,7 @@ where
             }
         }
 
-        subsystems.push(Subsystem {
+        clusters.push(Cluster {
             name,
             description,
             description_embedding,
@@ -93,13 +93,13 @@ where
         });
     }
 
-    subsystems.sort_by(|a, b| b.chunks.len().cmp(&a.chunks.len()));
+    clusters.sort_by(|a, b| b.chunks.len().cmp(&a.chunks.len()));
 
     let edges = build_edges(&dir_groups);
 
     Ok(SemanticMap {
         version: 1,
-        subsystems,
+        clusters,
         edges,
     })
 }
@@ -615,19 +615,4 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
         return 1.0;
     }
     1.0 - (dot / (norm_a * norm_b))
-}
-
-#[allow(dead_code)]
-fn slugify(s: &str) -> String {
-    s.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-        .chars()
-        .take(50)
-        .collect()
 }

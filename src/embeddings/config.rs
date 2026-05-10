@@ -121,8 +121,8 @@ impl EmbeddingConfig {
     }
 
     pub fn load_or_default() -> Result<Self> {
-        let provider_str = Self::get_git_config("semantic.provider")
-            .or_else(|| std::env::var("SEMANTIC_PROVIDER").ok())
+        let provider_str = Self::get_git_config("topology.provider")
+            .or_else(|| std::env::var("TOPOLOGY_PROVIDER").ok())
             .unwrap_or_else(|| "gemma".to_string());
 
         let provider = provider_str.parse()?;
@@ -134,22 +134,14 @@ impl EmbeddingConfig {
         })
     }
 
-    #[allow(dead_code)]
-    pub fn save(&self) -> Result<()> {
-        Self::set_git_config("semantic.provider", &self.provider.to_string())?;
-        self.openai.save()?;
-        self.gemma.save()?;
-        Ok(())
-    }
-
     pub fn show() -> Result<()> {
         let config = Self::load_or_default()?;
 
-        println!("[semantic]");
+        println!("[topology]");
         println!("  provider = {}", config.provider);
         println!();
 
-        println!("[semantic.openai]");
+        println!("[topology.openai]");
         println!("  model = {}", config.openai.model);
         println!("  maxTokens = {}", config.openai.max_tokens);
         if config.openai.api_key.is_some() {
@@ -157,7 +149,7 @@ impl EmbeddingConfig {
         }
         println!();
 
-        println!("[semantic.gemma]");
+        println!("[topology.gemma]");
         println!("  embeddingDim = {}", config.gemma.embedding_dim);
 
         Ok(())
@@ -168,37 +160,21 @@ impl OpenAIConfig {
     fn load() -> Self {
         Self {
             api_key: std::env::var("OPENAI_API_KEY").ok(),
-            model: EmbeddingConfig::get_git_config("semantic.openai.model")
+            model: EmbeddingConfig::get_git_config("topology.openai.model")
                 .unwrap_or_else(|| "text-embedding-3-small".to_string()),
-            max_tokens: EmbeddingConfig::get_git_config("semantic.openai.maxTokens")
+            max_tokens: EmbeddingConfig::get_git_config("topology.openai.maxTokens")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(8000),
         }
-    }
-
-    #[allow(dead_code)]
-    fn save(&self) -> Result<()> {
-        EmbeddingConfig::set_git_config("semantic.openai.model", &self.model)?;
-        EmbeddingConfig::set_git_config("semantic.openai.maxTokens", &self.max_tokens.to_string())?;
-        Ok(())
     }
 }
 
 impl GemmaConfig {
     fn load() -> Self {
         Self {
-            embedding_dim: EmbeddingConfig::get_git_config("semantic.gemma.embeddingDim")
+            embedding_dim: EmbeddingConfig::get_git_config("topology.gemma.embeddingDim")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(768),
         }
-    }
-
-    #[allow(dead_code)]
-    fn save(&self) -> Result<()> {
-        EmbeddingConfig::set_git_config(
-            "semantic.gemma.embeddingDim",
-            &self.embedding_dim.to_string(),
-        )?;
-        Ok(())
     }
 }

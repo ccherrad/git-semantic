@@ -1,6 +1,6 @@
 [package]
 name = "gitsem"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["CHERRAD Charef <ccherrad@gmail.com>"]
 description = "Semantic search and spatial navigation for Git repositories — map, get, and grep for AI coding agents"
@@ -28,16 +28,7 @@ walkdir = "2.5.0"
 webpki-roots = "1.0"
 zerocopy = "0.8.14"
 
-# Tree-sitter for code chunking
-tree-sitter = "0.25"
-tree-sitter-rust = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-javascript = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-c = "0.23"
-tree-sitter-cpp = "0.23"
-tree-sitter-go = "0.23"
+git-topology = { path = "../git-topology" }
 regex = "1.10"
 indicatif = "0.17"
 fastembed = { version = "5", default-features = false, features = ["online", "hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
