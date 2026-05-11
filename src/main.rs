@@ -563,12 +563,15 @@ fn mcp_serve() -> Result<()> {
                 let name = req["params"]["name"].as_str().unwrap_or("");
                 let args = &req["params"]["arguments"];
                 match mcp_dispatch(name, args) {
-                    Ok(text) => mcp_ok(
-                        id,
-                        serde_json::json!({
+                    Ok((text, structured)) => {
+                        let mut result = serde_json::json!({
                             "content": [{ "type": "text", "text": text }]
-                        }),
-                    ),
+                        });
+                        if let Some(data) = structured {
+                            result["structuredContent"] = data;
+                        }
+                        mcp_ok(id, result)
+                    }
                     Err(e) => mcp_err(id, -32000, &e.to_string()),
                 }
             }
@@ -590,29 +593,37 @@ fn mcp_err(id: serde_json::Value, code: i32, msg: &str) -> serde_json::Value {
     serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": msg } })
 }
 
-fn mcp_dispatch(name: &str, args: &serde_json::Value) -> Result<String> {
+fn mcp_dispatch(
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<(String, Option<serde_json::Value>)> {
     match name {
         "map" => {
             let query = args["query"].as_str();
-            mcp_map(query)
+            let text = mcp_map(query)?;
+            Ok((text, None))
         }
         "get" => {
             let location = args["location"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: location"))?;
             let mode = args["mode"].as_str();
-            mcp_get(location, mode)
+            let text = mcp_get(location, mode)?;
+            Ok((text, None))
         }
         "grep" => {
             let query = args["query"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: query"))?;
             let n = args["n"].as_i64().unwrap_or(10);
-            mcp_grep(query, n)
+            let text = mcp_grep(query, n)?;
+            Ok((text, None))
         }
         "health" => {
             let community = args["community"].as_str();
-            mcp_health(community)
+            let data = mcp_health(community)?;
+            let text = serde_json::to_string_pretty(&data).unwrap_or_default();
+            Ok((text, Some(data)))
         }
         _ => anyhow::bail!("unknown tool: {}", name),
     }
@@ -794,18 +805,18 @@ fn mcp_grep(query: &str, n: i64) -> Result<String> {
     Ok(out)
 }
 
-fn mcp_health(community: Option<&str>) -> Result<String> {
-    let mut out = Vec::new();
-    // Reuse health_command but capture output — delegate to existing logic via process
-    // For now write plain text summary
+fn mcp_health(community: Option<&str>) -> Result<serde_json::Value> {
     let db = db::Database::init()?;
     let clusters = db.all_clusters()?;
     if clusters.is_empty() {
-        return Ok(
-            "No index found. Run `git-semantic index` or `git-semantic hydrate` first.".into(),
-        );
+        return Ok(serde_json::json!({
+            "error": "no_index",
+            "hint": "Run `git-semantic index` or `git-semantic hydrate` first."
+        }));
     }
     let all_edges = db.all_edges()?;
+
+    let mut rows: Vec<serde_json::Value> = Vec::new();
 
     for cluster in &clusters {
         let files: Vec<&str> = cluster
@@ -832,17 +843,17 @@ fn mcp_health(community: Option<&str>) -> Result<String> {
             .filter(|e| file_set.contains(e.to.as_str()) && !file_set.contains(e.from.as_str()))
             .count();
 
-        out.push(format!(
-            "{} — files: {}  chunks: {}  coup-out: {}  fan-in: {}",
-            cluster.name,
-            files.len(),
-            cluster.chunks.len(),
-            coupling_out,
-            fan_in
-        ));
+        rows.push(serde_json::json!({
+            "name": cluster.name,
+            "description": cluster.description,
+            "files": files.len(),
+            "chunks": cluster.chunks.len(),
+            "coupling_out": coupling_out,
+            "fan_in": fan_in,
+        }));
     }
 
-    Ok(out.join("\n"))
+    Ok(serde_json::json!({ "clusters": rows }))
 }
 
 fn map_command(query: Option<&str>) -> Result<()> {
