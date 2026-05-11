@@ -1,6 +1,6 @@
 [package]
 name = "gitsem"
-version = "0.5.1"
+version = "0.5.3"
 edition = "2021"
 authors = ["CHERRAD Charef <ccherrad@gmail.com>"]
 description = "Semantic search and spatial navigation for Git repositories — map, get, and grep for AI coding agents"
